@@ -1,5 +1,6 @@
-const OpenAI = require("openai/index.mjs");
-// verify against openai@^4.77 — audio.speech streaming + pcm response_format
+// verify against openai@^4.77 — /v1/audio/speech + pcm response_format
+
+const { getResolvedModels } = require("./config");
 
 const OUT_SR = 16000;
 const IN_SR = 24000;
@@ -31,15 +32,14 @@ function resample24kTo16kPcm16(pcm24) {
 }
 
 /**
- * @param {{ textIter: AsyncIterable<string>, cancel: import('./cancel').CancelToken }} opts
+ * @param {{ textIter: AsyncIterable<string>, cancel: import('./cancel').CancelToken, instructions?: string }} opts
  * @returns {AsyncGenerator<Buffer>}
  */
 async function* streamSpeak(opts) {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) throw new Error("OPENAI_API_KEY required");
-  const client = new OpenAI({ apiKey });
-  const model = process.env.OPENAI_TTS_MODEL || "gpt-4o-mini-tts";
-  const voice = process.env.OPENAI_TTS_VOICE || "alloy";
+  const { tts: model, voice } = getResolvedModels();
+  const instructions = opts.instructions;
 
   let buf = "";
   for await (const delta of opts.textIter) {
@@ -50,32 +50,73 @@ async function* streamSpeak(opts) {
       const slice = buf.slice(0, m.index + 1).trim();
       buf = buf.slice(m.index + 1);
       if (slice.length > 0) {
-        yield* synthChunk(client, { model, voice, input: slice, cancel: opts.cancel });
+        yield* synthChunk({
+          apiKey,
+          model,
+          voice,
+          input: slice,
+          cancel: opts.cancel,
+          instructions,
+        });
       }
     }
   }
   if (buf.trim().length > 0) {
-    yield* synthChunk(client, { model, voice, input: buf.trim(), cancel: opts.cancel });
+    yield* synthChunk({
+      apiKey,
+      model,
+      voice,
+      input: buf.trim(),
+      cancel: opts.cancel,
+      instructions,
+    });
   }
 }
 
-async function* synthChunk(client, opts) {
+/**
+ * @param {{ apiKey: string, model: string, voice: string, input: string, cancel: import('./cancel').CancelToken, instructions?: string }} opts
+ */
+async function* synthChunk(opts) {
   opts.cancel.throwIfCancelled();
-  const response = await client.audio.speech.create({
-    model: opts.model,
-    voice: opts.voice,
-    input: opts.input,
-    response_format: "pcm",
-  });
+  const ac = new AbortController();
+  const unsub = opts.cancel.subscribe(() => ac.abort());
+  try {
+    const body = {
+      model: opts.model,
+      voice: opts.voice,
+      input: opts.input,
+      response_format: "pcm",
+    };
+    if (opts.instructions && String(opts.instructions).trim()) {
+      body.instructions = String(opts.instructions).trim();
+    }
 
-  const ab = await response.arrayBuffer();
-  const acc = Buffer.from(ab);
+    const res = await fetch("https://api.openai.com/v1/audio/speech", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${opts.apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+      signal: ac.signal,
+    });
 
-  const pcm16 = resample24kTo16kPcm16(acc);
-  const frame = 640;
-  for (let i = 0; i < pcm16.length; i += frame) {
-    opts.cancel.throwIfCancelled();
-    yield pcm16.subarray(i, i + frame);
+    if (!res.ok) {
+      const t = await res.text();
+      throw new Error(`TTS HTTP ${res.status}: ${t.slice(0, 400)}`);
+    }
+
+    const ab = await res.arrayBuffer();
+    const acc = Buffer.from(ab);
+
+    const pcm16 = resample24kTo16kPcm16(acc);
+    const frame = 640;
+    for (let i = 0; i < pcm16.length; i += frame) {
+      opts.cancel.throwIfCancelled();
+      yield pcm16.subarray(i, i + frame);
+    }
+  } finally {
+    unsub();
   }
 }
 

@@ -4,6 +4,7 @@ const fs = require("fs");
 const client = require("prom-client");
 const { SessionWorker } = require("../agent/session_worker");
 const { createLogger } = require("../agent/logger");
+const { validateOpenAIChainOrThrow } = require("../agent/openai_validate");
 
 const log = createLogger();
 
@@ -98,6 +99,21 @@ function createControlRouter(deps) {
     if (!fs.existsSync(scriptResolved)) {
       deps.sessionRegistry.releaseSlot(slot);
       return res.status(400).json({ error: "scriptPath not found" });
+    }
+
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) {
+      deps.sessionRegistry.releaseSlot(slot);
+      return res.status(400).json({ error: "OPENAI_API_KEY is required" });
+    }
+
+    try {
+      await validateOpenAIChainOrThrow(apiKey);
+    } catch (e) {
+      deps.sessionRegistry.releaseSlot(slot);
+      const msg = e instanceof Error ? e.message : String(e);
+      log.error({ err: msg }, "OpenAI model validation failed");
+      return res.status(502).json({ error: msg });
     }
 
     const sessionId = deps.sessionRegistry.newSessionId();

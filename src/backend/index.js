@@ -14,6 +14,8 @@ const { SessionRegistry } = require("./session_registry");
 const { createControlRouter } = require("./control_server");
 
 dotenv.config();
+const { logResolvedModelsAtStartup } = require("../agent/config");
+logResolvedModelsAtStartup();
 
 const app = express();
 const PORT = process.env.PORT || 3000;

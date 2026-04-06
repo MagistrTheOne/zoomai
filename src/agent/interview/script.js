@@ -6,14 +6,14 @@ const YAML = require("yaml");
  */
 
 /**
- * @typedef {{
- *   vacancy: string,
- *   greeting: string,
- *   closing: string,
- *   time_budget_seconds: number,
- *   persona_style: string,
- *   questions: ScriptQuestion[],
- * }} InterviewScript
+ * @typedef {object} InterviewScript
+ * @property {string} vacancy
+ * @property {string} greeting
+ * @property {string} closing
+ * @property {number} time_budget_seconds
+ * @property {string} persona_style
+ * @property {ScriptQuestion[]} questions
+ * @property {string} [voiceInstructions] — from YAML `voice_instructions`
  */
 
 /**
@@ -34,6 +34,12 @@ function loadScript(filePath) {
   }
   doc.time_budget_seconds = Number(doc.time_budget_seconds ?? 900);
   doc.persona_style = String(doc.persona_style || "professional");
+  const voiceInstructions =
+    doc.voice_instructions != null && String(doc.voice_instructions).trim()
+      ? String(doc.voice_instructions)
+      : undefined;
+  delete doc.voice_instructions;
+  doc.voiceInstructions = voiceInstructions;
   return /** @type {InterviewScript} */ (doc);
 }
 

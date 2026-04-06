@@ -10,18 +10,7 @@ const {
   interpretTranscriptionStreamEvent,
   appendSseChunk,
 } = require("./stt_transcription_sse");
-
-const DEFAULT_STT_MODEL = "gpt-4o-mini-transcribe";
-
-/**
- * @returns {'http_stream' | 'whisper_chunked' | 'realtime_ws'}
- */
-function resolveSttMode() {
-  const explicit = (process.env.STT_MODE || "").trim();
-  if (explicit) return /** @type {const} */ (explicit);
-  if (process.env.OPENAI_STT_USE_REALTIME === "1") return "realtime_ws";
-  return "http_stream";
-}
+const { resolveSttMode, getSttModel } = require("./config");
 
 /**
  * @param {Buffer} pcm16 mono 16kHz
@@ -179,7 +168,7 @@ async function* streamTranscribeHttpStream(frameIter, opts) {
   if (!apiKey) {
     throw new Error("OPENAI_API_KEY is required for STT");
   }
-  const model = process.env.OPENAI_STT_MODEL || DEFAULT_STT_MODEL;
+  const model = getSttModel();
 
   for await (const utterancePcm of segmentUtterances(frameIter, cancel)) {
     cancel.throwIfCancelled();
@@ -207,7 +196,7 @@ async function* streamTranscribe(frameIter, opts) {
   }
 
   const mode = resolveSttMode();
-  const model = process.env.OPENAI_STT_MODEL || DEFAULT_STT_MODEL;
+  const model = getSttModel();
 
   if (mode === "realtime_ws") {
     yield* streamTranscribeRealtime(frameIter, {
@@ -234,15 +223,16 @@ async function* streamTranscribe(frameIter, opts) {
     return;
   }
 
-  log.warn({ mode }, "unknown STT_MODE; falling back to http_stream");
-  yield* streamTranscribeHttpStream(frameIter, opts);
+  throw new Error(`unhandled STT_MODE: ${mode}`);
 }
 
 async function* streamTranscribeRealtime(frameIter, opts) {
   const { cancel, model, onPartial } = opts;
   const apiKey = process.env.OPENAI_API_KEY;
-  const realtimeModel =
-    process.env.OPENAI_REALTIME_MODEL || "gpt-4o-realtime-preview-2024-12-17";
+  const realtimeModel = process.env.OPENAI_REALTIME_MODEL?.trim();
+  if (!realtimeModel) {
+    throw new Error("OPENAI_REALTIME_MODEL is required for STT_MODE=realtime_ws");
+  }
 
   const wsUrl = `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(
     realtimeModel
@@ -375,8 +365,12 @@ async function* streamTranscribeWhisperChunks(openai, frameIter, cancel, session
   const chunkMs = Number(process.env.OPENAI_STT_CHUNK_MS || 1500);
   const bytesPerMs = 32;
   const targetBytes = chunkMs * bytesPerMs;
-  const whisperModel =
-    process.env.OPENAI_STT_WHISPER_MODEL || "whisper-1";
+  const whisperModel = process.env.OPENAI_STT_WHISPER_MODEL?.trim();
+  if (!whisperModel) {
+    throw new Error(
+      "OPENAI_STT_WHISPER_MODEL is required for STT_MODE=whisper_chunked"
+    );
+  }
 
   for await (const frame of frameIter) {
     cancel.throwIfCancelled();
@@ -405,7 +399,8 @@ async function* streamTranscribeWhisperChunks(openai, frameIter, cancel, session
           };
         }
       } catch (e) {
-        log.warn({ err: String(e) }, "whisper chunk failed");
+        log.error({ err: String(e) }, "whisper chunk failed");
+        throw e;
       } finally {
         try {
           await fsp.unlink(f);
@@ -420,7 +415,6 @@ async function* streamTranscribeWhisperChunks(openai, frameIter, cancel, session
 module.exports = {
   streamTranscribe,
   pcm16ToWav,
-  resolveSttMode,
   parseSseResponseBody,
   processSseDataLine,
 };

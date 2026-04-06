@@ -220,7 +220,11 @@ class SessionWorker {
     async function* once() {
       yield text;
     }
-    for await (const pcm of streamSpeak({ textIter: once(), cancel: turn })) {
+    for await (const pcm of streamSpeak({
+      textIter: once(),
+      cancel: turn,
+      instructions: this.script.voiceInstructions,
+    })) {
       await pacer.enqueue(pcm);
     }
     turn.cancel();
@@ -252,7 +256,11 @@ class SessionWorker {
       }
     }
 
-    for await (const pcm of streamSpeak({ textIter: textIter(), cancel: turn })) {
+    for await (const pcm of streamSpeak({
+      textIter: textIter(),
+      cancel: turn,
+      instructions: this.script.voiceInstructions,
+    })) {
       await pacer.enqueue(pcm);
     }
     turn.cancel();
