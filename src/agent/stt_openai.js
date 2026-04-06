@@ -118,10 +118,10 @@ function* processSseDataLine(line, state, onPartial, log) {
 
 /**
  * @param {Buffer} pcm16
- * @param {{ model: string, apiKey: string, cancel: import('./cancel').CancelToken, onPartial?: (t: string) => void, log: ReturnType<typeof createLogger> }} opts
+ * @param {{ model: string, apiKey: string, cancel: import('./cancel').CancelToken, onPartial?: (t: string) => void, log: ReturnType<typeof createLogger>, vadSpeechEndMs: number }} opts
  */
 async function* transcribeOneUtteranceHttpStream(pcm16, opts) {
-  const { model, apiKey, cancel, onPartial, log } = opts;
+  const { model, apiKey, cancel, onPartial, log, vadSpeechEndMs } = opts;
   const wav = pcm16ToWav(pcm16);
   const blob = new Blob([wav], { type: "audio/wav" });
   const form = new FormData();
@@ -151,7 +151,23 @@ async function* transcribeOneUtteranceHttpStream(pcm16, opts) {
       throw new Error("transcription response has no body");
     }
     const state = { accumulated: "" };
-    yield* parseSseResponseBody(res.body, cancel, state, onPartial, log);
+    for await (const seg of parseSseResponseBody(
+      res.body,
+      cancel,
+      state,
+      onPartial,
+      log
+    )) {
+      if (seg.isFinal) {
+        yield {
+          ...seg,
+          vadSpeechEndMs,
+          sttFinalMs: Date.now(),
+        };
+      } else {
+        yield seg;
+      }
+    }
   } finally {
     unsub();
   }
@@ -172,12 +188,14 @@ async function* streamTranscribeHttpStream(frameIter, opts) {
 
   for await (const utterancePcm of segmentUtterances(frameIter, cancel)) {
     cancel.throwIfCancelled();
+    const vadSpeechEndMs = Date.now();
     yield* transcribeOneUtteranceHttpStream(utterancePcm, {
       model,
       apiKey,
       cancel,
       onPartial: opts.onPartial,
       log,
+      vadSpeechEndMs,
     });
   }
 }
@@ -378,6 +396,7 @@ async function* streamTranscribeWhisperChunks(openai, frameIter, cancel, session
     while (buffer.length >= targetBytes) {
       const chunk = buffer.subarray(0, targetBytes);
       buffer = buffer.subarray(targetBytes);
+      const vadSpeechEndMs = Date.now();
       const wav = pcm16ToWav(chunk);
       const f = path.join(
         os.tmpdir(),
@@ -396,6 +415,8 @@ async function* streamTranscribeWhisperChunks(openai, frameIter, cancel, session
             confidence: 1,
             tStart: undefined,
             tEnd: undefined,
+            vadSpeechEndMs,
+            sttFinalMs: Date.now(),
           };
         }
       } catch (e) {

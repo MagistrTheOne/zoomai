@@ -66,6 +66,12 @@ class SessionWorker {
     this.questionIndex = 0;
     this.startedAt = Date.now();
     this.timeLowFired = false;
+    /** @type {number} */
+    this._turnId = 0;
+    /** @type {{ vadSpeechEndMs: number, sttFinalMs: number } | null} */
+    this._lastSttTiming = null;
+    /** @type {number | null} */
+    this._currentTurnFirstSinkMs = null;
     /** @type {ReturnType<typeof setInterval> | null} */
     this._timer = null;
     /** @type {import('playwright-core').Page | null} */
@@ -146,7 +152,17 @@ class SessionWorker {
     const bridge = await getOrCreateAudioBridge();
     const frames = iteratePcmFrames(bridge, this.sessionId, this.sessionCancel);
 
-    const sink = createAudioSink(mode, { page, slot: this.slot });
+    const rawSink = createAudioSink(mode, { page, slot: this.slot });
+    const sink = {
+      write: async (/** @type {Buffer} */ buf) => {
+        if (buf.length && this._currentTurnFirstSinkMs == null) {
+          this._currentTurnFirstSinkMs = Date.now();
+        }
+        return rawSink.write(buf);
+      },
+      flush: () => rawSink.flush(),
+      close: rawSink.close?.bind(rawSink),
+    };
     const pacer = new AudioPacer({ sink, cancel: this.sessionCancel });
     this._pacer = pacer;
 
@@ -171,18 +187,24 @@ class SessionWorker {
       this.interrupt.cancelActive();
       await pacer.flush();
       pacer.stop();
-      if (typeof sink.close === "function") await sink.close();
+      if (typeof rawSink.close === "function") await rawSink.close();
       if (this._timer) clearInterval(this._timer);
     }
   }
 
   /**
-   * @param {AsyncGenerator<{ text: string, isFinal: boolean }>} gen
+   * @param {AsyncGenerator<{ text: string, isFinal: boolean, vadSpeechEndMs?: number, sttFinalMs?: number }>} gen
    */
   async consumeStt(gen, ts) {
     for await (const seg of gen) {
       this.sessionCancel.throwIfCancelled();
       if (seg.isFinal && seg.text) {
+        if (seg.vadSpeechEndMs != null && seg.sttFinalMs != null) {
+          this._lastSttTiming = {
+            vadSpeechEndMs: seg.vadSpeechEndMs,
+            sttFinalMs: seg.sttFinalMs,
+          };
+        }
         this.memory.push("user", seg.text);
         await this.appendLine({
           speaker: "candidate",
@@ -215,25 +237,55 @@ class SessionWorker {
   }
 
   async speakTts(pacer, text, ts) {
+    const turnId = ++this._turnId;
+    this._currentTurnFirstSinkMs = null;
     const turn = this.interrupt.begin();
     await this.appendLine({ speaker: "agent", text, time: ts() });
     async function* once() {
       yield text;
     }
+    let firstTtsMs = null;
+    let ttsBytes = 0;
     for await (const pcm of streamSpeak({
       textIter: once(),
       cancel: turn,
       instructions: this.script.voiceInstructions,
     })) {
+      if (firstTtsMs == null) firstTtsMs = Date.now();
+      ttsBytes += pcm.length;
       await pacer.enqueue(pcm);
     }
     turn.cancel();
+    const tAudioFirst =
+      firstTtsMs != null && this._currentTurnFirstSinkMs != null
+        ? this._currentTurnFirstSinkMs - firstTtsMs
+        : null;
+    this.log.info(
+      {
+        session_id: this.sessionId,
+        turn_id: turnId,
+        t_user_speech_end_ms: null,
+        t_stt_final_ms: null,
+        t_llm_first_token_ms: null,
+        t_tts_first_chunk_ms: null,
+        t_audio_first_frame_ms: tAudioFirst,
+        t_e2e_ms: null,
+        llm_total_tokens: 0,
+        tts_total_bytes: ttsBytes,
+      },
+      "turn_latency"
+    );
   }
 
   /**
    * @param {import('./interview/script').ScriptQuestion} q
    */
   async speakLlmTurn(pacer, ts, q) {
+    const turnId = ++this._turnId;
+    this._currentTurnFirstSinkMs = null;
+    const sttSnap = this._lastSttTiming
+      ? { ...this._lastSttTiming }
+      : null;
     const turn = this.interrupt.begin();
     const system = buildSystemPrompt(
       this.script,
@@ -250,20 +302,61 @@ class SessionWorker {
       },
     ];
 
+    let llmFirstMs = null;
+    let llmChars = 0;
     async function* textIter() {
       for await (const d of streamReply({ messages, cancel: turn })) {
+        if (llmFirstMs == null) llmFirstMs = Date.now();
+        llmChars += d.length;
         yield d;
       }
     }
 
+    let firstTtsMs = null;
+    let ttsBytes = 0;
     for await (const pcm of streamSpeak({
       textIter: textIter(),
       cancel: turn,
       instructions: this.script.voiceInstructions,
     })) {
+      if (firstTtsMs == null) firstTtsMs = Date.now();
+      ttsBytes += pcm.length;
       await pacer.enqueue(pcm);
     }
     turn.cancel();
+
+    const vad = sttSnap?.vadSpeechEndMs ?? null;
+    const sttFin = sttSnap?.sttFinalMs ?? null;
+    const tSttFinal =
+      vad != null && sttFin != null ? sttFin - vad : null;
+    const tLlmFirst =
+      sttFin != null && llmFirstMs != null ? llmFirstMs - sttFin : null;
+    const tTtsFirst =
+      llmFirstMs != null && firstTtsMs != null ? firstTtsMs - llmFirstMs : null;
+    const tAudioFirst =
+      firstTtsMs != null && this._currentTurnFirstSinkMs != null
+        ? this._currentTurnFirstSinkMs - firstTtsMs
+        : null;
+    const tE2e =
+      vad != null && this._currentTurnFirstSinkMs != null
+        ? this._currentTurnFirstSinkMs - vad
+        : null;
+
+    this.log.info(
+      {
+        session_id: this.sessionId,
+        turn_id: turnId,
+        t_user_speech_end_ms: vad,
+        t_stt_final_ms: tSttFinal,
+        t_llm_first_token_ms: tLlmFirst,
+        t_tts_first_chunk_ms: tTtsFirst,
+        t_audio_first_frame_ms: tAudioFirst,
+        t_e2e_ms: tE2e,
+        llm_total_tokens: Math.ceil(llmChars / 4),
+        tts_total_bytes: ttsBytes,
+      },
+      "turn_latency"
+    );
   }
 }
 
