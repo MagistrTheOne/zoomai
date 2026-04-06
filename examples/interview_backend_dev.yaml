@@ -1,0 +1,35 @@
+vacancy: Backend Developer
+greeting: |
+  Здравствуйте! Я проведу короткое интервью по backend-разработке, около 15 минут.
+  Когда будете готовы, ответьте голосом на первый вопрос.
+closing: |
+  Спасибо за уделённое время. Мы свяжемся с вами по результатам. Хорошего дня!
+time_budget_seconds: 900
+persona_style: "доброжелательный, профессиональный, краткий"
+questions:
+  - id: q1_stack
+    text: Расскажите о вашем основном стеке и опыте с Node.js или аналогами.
+    followups:
+      - Что именно вы делали на последнем проекте?
+    required: true
+    max_seconds: 180
+  - id: q2_data
+    text: Как вы проектируете работу с базами данных и миграциями?
+    required: true
+    max_seconds: 120
+  - id: q3_api
+    text: Как подходите к проектированию REST или GraphQL API?
+    required: true
+    max_seconds: 120
+  - id: q4_perf
+    text: Приведите пример оптимизации производительности бэкенда.
+    required: false
+    max_seconds: 120
+  - id: q5_errors
+    text: Как организуете обработку ошибок и логирование в продакшене?
+    required: true
+    max_seconds: 120
+  - id: q6_team
+    text: Как взаимодействуете с фронтендом и DevOps в команде?
+    required: false
+    max_seconds: 120
