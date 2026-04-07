@@ -12,10 +12,16 @@ const {
 } = require("./docker_resolve");
 const { SessionRegistry } = require("./session_registry");
 const { createControlRouter } = require("./control_server");
+const { createLogger } = require("../agent/logger");
 
 dotenv.config();
+const log = createLogger();
 const { logResolvedModelsAtStartup } = require("../agent/config");
 logResolvedModelsAtStartup();
+log.info(
+  { audioMode: process.env.AUDIO_OUT_MODE || "browser_injection" },
+  "audio_out_mode_active"
+);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -139,3 +145,34 @@ http.createServer(app).listen(PORT, () => {
 http.createServer(controlApp).listen(CONTROL_PORT, () => {
   console.log(`Control plane listening on http://localhost:${CONTROL_PORT}`);
 });
+
+let shuttingDown = false;
+async function drainAndExit(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  log.info({ signal }, "shutdown_signal_received");
+  const sessions = sessionRegistry.listAll();
+  await Promise.allSettled(
+    sessions.map((worker) => worker.gracefulShutdown(`signal_${signal}`))
+  );
+  for (const w of sessions) {
+    sessionRegistry.releaseSession(w.sessionId, w.slot);
+  }
+  log.info("shutdown_complete");
+  process.exit(0);
+}
+
+process.on("SIGTERM", () => {
+  drainAndExit("SIGTERM");
+});
+process.on("SIGINT", () => {
+  drainAndExit("SIGINT");
+});
+
+setTimeout(() => {}, 0);
+process.on("SIGTERM", () =>
+  setTimeout(() => process.exit(1), 15_000).unref()
+);
+process.on("SIGINT", () =>
+  setTimeout(() => process.exit(1), 15_000).unref()
+);

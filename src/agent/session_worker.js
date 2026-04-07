@@ -16,6 +16,7 @@ const { States, Events, next } = require("./interview/state_machine");
 const { buildSystemPrompt } = require("./interview/persona");
 const { streamReply } = require("./llm_openai");
 const { createLogger } = require("./logger");
+const metrics = require("./metrics");
 
 class InterruptController {
   constructor() {
@@ -78,6 +79,35 @@ class SessionWorker {
     this._page = null;
     /** @type {AudioPacer | null} */
     this._pacer = null;
+    this._shuttingDown = false;
+    /** @type {Promise<void> | null} */
+    this._inFlightSpeakPromise = null;
+    /** @type {(() => void) | null} */
+    this._resolveInFlightSpeak = null;
+    /** @type {() => number} */
+    this._tsFn = () => 0;
+    /** @type {boolean} */
+    this._agentSpeaking = false;
+    /** @type {number} */
+    this._agentSpeakingStartedAt = 0;
+    /** @type {number} */
+    this._agentSpeakingEndedAt = 0;
+    /** @type {ReturnType<typeof setTimeout> | null} */
+    this._agentSpeakingClearTimer = null;
+  }
+
+  _beginInFlightSpeak() {
+    this._inFlightSpeakPromise = new Promise((resolve) => {
+      this._resolveInFlightSpeak = resolve;
+    });
+  }
+
+  _endInFlightSpeak() {
+    if (this._resolveInFlightSpeak) {
+      this._resolveInFlightSpeak();
+      this._resolveInFlightSpeak = null;
+    }
+    this._inFlightSpeakPromise = null;
   }
 
   timeLeftSec() {
@@ -91,6 +121,52 @@ class SessionWorker {
       JSON.stringify(obj) + "\n",
       "utf8"
     );
+  }
+
+  /**
+   * Polite teardown: stop after current agent turn, play closing, leave meeting.
+   * @param {string} [reason]
+   */
+  async gracefulShutdown(reason = "operator_stop") {
+    this._shuttingDown = true;
+    const inFlight = this._inFlightSpeakPromise ?? Promise.resolve();
+    const done = inFlight.then(() => "done");
+    const timeout = new Promise((r) => setTimeout(() => r("timeout"), 5000));
+    const winner = await Promise.race([done, timeout]);
+    if (winner === "timeout") {
+      this.interrupt.cancelActive();
+      await inFlight.catch((err) =>
+        this.log.warn({ err }, "graceful_shutdown_inflight_speak_abort")
+      );
+    }
+
+    const closingToken = new CancelToken();
+    if (this._pacer && this._tsFn) {
+      try {
+        await this.speakTts(this._pacer, this.script.closing, this._tsFn, {
+          externalCancelToken: closingToken,
+        });
+      } catch (e) {
+        this.log.warn({ err: String(e) }, "graceful_shutdown_closing_failed");
+      }
+    }
+    if (this._page) {
+      try {
+        await leaveMeeting(this._page);
+      } catch (e) {
+        this.log.warn({ err: String(e) }, "graceful_shutdown_leave_failed");
+      }
+    }
+    this.fsmState = States.CLOSED;
+    this.log.info(
+      {
+        event: "session_closed",
+        reason,
+        duration_ms: Date.now() - this.startedAt,
+      },
+      "turn_latency"
+    );
+    this.sessionCancel.cancel();
   }
 
   async run() {
@@ -112,10 +188,15 @@ class SessionWorker {
     this._page = page;
     const t0 = Date.now();
     const ts = () => (Date.now() - t0) / 1000;
+    this._tsFn = ts;
 
     this._timer = setInterval(() => {
       const left = this.timeLeftSec();
-      if (!this.timeLowFired && left <= 90) {
+      if (
+        !this.timeLowFired &&
+        this.script.time_budget_seconds > 90 &&
+        left <= 90
+      ) {
         this.timeLowFired = true;
         next(this.fsmState, Events.TIME_LOW, {
           script: this.script,
@@ -152,7 +233,11 @@ class SessionWorker {
     const bridge = await getOrCreateAudioBridge();
     const frames = iteratePcmFrames(bridge, this.sessionId, this.sessionCancel);
 
-    const rawSink = createAudioSink(mode, { page, slot: this.slot });
+    const rawSink = createAudioSink(mode, {
+      page,
+      slot: this.slot,
+      log: this.log,
+    });
     const sink = {
       write: async (/** @type {Buffer} */ buf) => {
         if (buf.length && this._currentTurnFirstSinkMs == null) {
@@ -163,17 +248,56 @@ class SessionWorker {
       flush: () => rawSink.flush(),
       close: rawSink.close?.bind(rawSink),
     };
-    const pacer = new AudioPacer({ sink, cancel: this.sessionCancel });
+    const pacer = new AudioPacer({
+      sink,
+      cancel: this.sessionCancel,
+      log: this.log,
+    });
     this._pacer = pacer;
 
+    // AUDIO_OUT_MODE=browser_injection: barge-in is disabled while _agentSpeaking
+    // because TTS and Zoom/STT share one Chromium process (acoustic feedback).
+    // virtual_mic: separate capture path — barge-in uses warmup + normal rules.
     const sttGen = streamTranscribe(frames, {
       cancel: this.sessionCancel,
       sessionId: this.sessionId,
-      onPartial: (t) => {
-        if (t && t.length > 2) {
+      onSpeechStart: () => {
+        const audioMode = process.env.AUDIO_OUT_MODE || "browser_injection";
+        const elapsed = this._agentSpeakingStartedAt
+          ? Date.now() - this._agentSpeakingStartedAt
+          : -1;
+
+        if (audioMode === "browser_injection") {
+          if (this._agentSpeaking) {
+            this.log.debug(
+              { elapsed, mode: audioMode },
+              "barge_in_suppressed_browser_injection"
+            );
+            return;
+          }
+          this.log.info({ elapsed, mode: audioMode }, "barge_in");
+          metrics.bargeInTotal.inc();
           this.interrupt.cancelActive();
-          pacer.flush().catch(() => {});
+          pacer.flush().catch((err) =>
+            this.log.warn({ err }, "pacer_flush_failed_during_barge_in")
+          );
+          return;
         }
+
+        if (!this._agentSpeaking) {
+          this.log.debug({ elapsed }, "barge_in_ignored_not_speaking");
+          return;
+        }
+        if (elapsed < 750) {
+          this.log.debug({ elapsed }, "barge_in_suppressed_warmup");
+          return;
+        }
+        this.log.info({ elapsed }, "barge_in");
+        metrics.bargeInTotal.inc();
+        this.interrupt.cancelActive();
+        pacer.flush().catch((err) =>
+          this.log.warn({ err }, "pacer_flush_failed_during_barge_in")
+        );
       },
     });
 
@@ -224,38 +348,89 @@ class SessionWorker {
     this.fsmState = States.ASKING;
 
     for (let i = 0; i < this.script.questions.length; i++) {
-      if (this.sessionCancel.cancelled || this.timeLeftSec() <= 0) break;
+      if (
+        this._shuttingDown ||
+        this.sessionCancel.cancelled ||
+        this.timeLeftSec() <= 0
+      ) {
+        break;
+      }
       this.questionIndex = i;
       const q = this.script.questions[i];
       await this.speakLlmTurn(pacer, ts, q);
+      if (this._shuttingDown) break;
       await new Promise((r) => setTimeout(r, 300));
     }
 
-    await this.speakTts(pacer, this.script.closing, ts);
-    this.fsmState = States.CLOSED;
-    await leaveMeeting(page);
+    if (!this._shuttingDown && !this.sessionCancel.cancelled) {
+      await this.speakTts(pacer, this.script.closing, ts);
+      this.fsmState = States.CLOSED;
+      await leaveMeeting(page);
+    }
   }
 
-  async speakTts(pacer, text, ts) {
+  /**
+   * @param {{ externalCancelToken?: import('./cancel').CancelToken }} [options]
+   */
+  async speakTts(pacer, text, ts, options = {}) {
+    if (this._agentSpeakingClearTimer != null) {
+      clearTimeout(this._agentSpeakingClearTimer);
+      this._agentSpeakingClearTimer = null;
+    }
+    this._agentSpeaking = true;
+    this._agentSpeakingStartedAt = Date.now();
+    this._beginInFlightSpeak();
+    try {
+      return await this._speakTtsBody(pacer, text, ts, options);
+    } finally {
+      this._agentSpeakingEndedAt = Date.now();
+      this._endInFlightSpeak();
+      this._agentSpeakingClearTimer = setTimeout(() => {
+        this._agentSpeaking = false;
+        this._agentSpeakingClearTimer = null;
+      }, 500);
+    }
+  }
+
+  /**
+   * @param {{ externalCancelToken?: import('./cancel').CancelToken }} [options]
+   */
+  async _speakTtsBody(pacer, text, ts, options = {}) {
     const turnId = ++this._turnId;
     this._currentTurnFirstSinkMs = null;
-    const turn = this.interrupt.begin();
+    const turn = options.externalCancelToken ?? this.interrupt.begin();
     await this.appendLine({ speaker: "agent", text, time: ts() });
     async function* once() {
       yield text;
     }
     let firstTtsMs = null;
     let ttsBytes = 0;
-    for await (const pcm of streamSpeak({
-      textIter: once(),
-      cancel: turn,
-      instructions: this.script.voiceInstructions,
-    })) {
-      if (firstTtsMs == null) firstTtsMs = Date.now();
-      ttsBytes += pcm.length;
-      await pacer.enqueue(pcm);
+    try {
+      try {
+        for await (const pcm of streamSpeak({
+          textIter: once(),
+          cancel: turn,
+          instructions: this.script.voiceInstructions,
+        })) {
+          if (firstTtsMs == null) firstTtsMs = Date.now();
+          ttsBytes += pcm.length;
+          await pacer.enqueue(pcm);
+        }
+      } catch (err) {
+        if (
+          err.name === "AbortError" ||
+          this.sessionCancel.cancelled ||
+          turn.cancelled ||
+          err.code === "CANCELLED"
+        ) {
+          this.log.info({}, "tts_aborted_clean");
+          return;
+        }
+        throw err;
+      }
+    } finally {
+      turn.cancel();
     }
-    turn.cancel();
     const tAudioFirst =
       firstTtsMs != null && this._currentTurnFirstSinkMs != null
         ? this._currentTurnFirstSinkMs - firstTtsMs
@@ -281,6 +456,29 @@ class SessionWorker {
    * @param {import('./interview/script').ScriptQuestion} q
    */
   async speakLlmTurn(pacer, ts, q) {
+    if (this._agentSpeakingClearTimer != null) {
+      clearTimeout(this._agentSpeakingClearTimer);
+      this._agentSpeakingClearTimer = null;
+    }
+    this._agentSpeaking = true;
+    this._agentSpeakingStartedAt = Date.now();
+    this._beginInFlightSpeak();
+    try {
+      return await this._speakLlmTurnBody(pacer, ts, q);
+    } finally {
+      this._agentSpeakingEndedAt = Date.now();
+      this._endInFlightSpeak();
+      this._agentSpeakingClearTimer = setTimeout(() => {
+        this._agentSpeaking = false;
+        this._agentSpeakingClearTimer = null;
+      }, 500);
+    }
+  }
+
+  /**
+   * @param {import('./interview/script').ScriptQuestion} q
+   */
+  async _speakLlmTurnBody(pacer, ts, q) {
     const turnId = ++this._turnId;
     this._currentTurnFirstSinkMs = null;
     const sttSnap = this._lastSttTiming
@@ -314,16 +512,32 @@ class SessionWorker {
 
     let firstTtsMs = null;
     let ttsBytes = 0;
-    for await (const pcm of streamSpeak({
-      textIter: textIter(),
-      cancel: turn,
-      instructions: this.script.voiceInstructions,
-    })) {
-      if (firstTtsMs == null) firstTtsMs = Date.now();
-      ttsBytes += pcm.length;
-      await pacer.enqueue(pcm);
+    try {
+      try {
+        for await (const pcm of streamSpeak({
+          textIter: textIter(),
+          cancel: turn,
+          instructions: this.script.voiceInstructions,
+        })) {
+          if (firstTtsMs == null) firstTtsMs = Date.now();
+          ttsBytes += pcm.length;
+          await pacer.enqueue(pcm);
+        }
+      } catch (err) {
+        if (
+          err.name === "AbortError" ||
+          this.sessionCancel.cancelled ||
+          turn.cancelled ||
+          err.code === "CANCELLED"
+        ) {
+          this.log.info({}, "tts_aborted_clean");
+          return;
+        }
+        throw err;
+      }
+    } finally {
+      turn.cancel();
     }
-    turn.cancel();
 
     const vad = sttSnap?.vadSpeechEndMs ?? null;
     const sttFin = sttSnap?.sttFinalMs ?? null;
@@ -357,6 +571,10 @@ class SessionWorker {
       },
       "turn_latency"
     );
+    if (tSttFinal != null) metrics.sttFinalLatency.observe(tSttFinal);
+    if (tLlmFirst != null) metrics.llmTtft.observe(tLlmFirst);
+    if (tTtsFirst != null) metrics.ttsTtfb.observe(tTtsFirst);
+    if (tE2e != null) metrics.e2eLatency.observe(tE2e);
   }
 }
 

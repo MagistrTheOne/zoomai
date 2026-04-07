@@ -15,6 +15,7 @@ const {
   startCaptionLogging,
   enableCaptions,
 } = require("./browser_utils.js");
+const { createLogger } = require("../agent/logger");
 
 /**
  * @param {string} origUrl
@@ -30,6 +31,7 @@ const {
  * }} [options]
  */
 async function runZoomBot(origUrl, transcriptPath, headless, options = {}) {
+  const log = createLogger(options.sessionId);
   const waitRoomLimitMs = options.waitRoomLimitMs ?? 5 * 60_000;
   const agent = options.agent;
   const pulseSlot = options.pulseSlot;
@@ -88,37 +90,115 @@ async function runZoomBot(origUrl, transcriptPath, headless, options = {}) {
   try {
     await page.goto(toWebClient(origUrl), { waitUntil: "domcontentloaded" });
 
-    // mute audio, hide video
-    await page.waitForTimeout(4000); // wait for buttons to load
-    await page.getByRole("button", { name: /mute/i }).click();
-    await page.getByRole("button", { name: /stop video/i }).click();
+    // Wait up to 60s for the prejoin name field — this is the real "we are on
+    // the prejoin page" signal, more reliable than a fixed sleep.
+    // Zoom prejoin name field. Multiple strategies because the input has no
+    // placeholder and no aria-label — only a sibling <label>Your Name</label>.
+    const nameField = page
+      .locator(
+        [
+          'label:has-text("Your Name") + input',
+          'label:has-text("Your Name") ~ input',
+          'input[type="text"]:visible',
+          'input[type="text"][placeholder*="name" i]',
+          'input[aria-label*="name" i]',
+          'input:visible',
+        ].join(', ')
+      )
+      .first();
+    try {
+      await nameField.waitFor({ state: "visible", timeout: 60_000 });
+      log.info({ sessionId: options.sessionId }, "zoom_bot_prejoin_ready");
+    } catch (err) {
+      const screenshotPath = `./transcripts/prejoin_failed_${Date.now()}.png`;
+      await page
+        .screenshot({ path: screenshotPath, fullPage: true })
+        .catch(() => {});
+      log.error(
+        { err: err.message, screenshot: screenshotPath, url: page.url() },
+        "zoom_bot_prejoin_not_ready"
+      );
+      throw err;
+    }
 
-    await page.getByRole("textbox", { name: /your name/i }).fill(displayName);
-
-    await page.keyboard.press("Enter");
-
-    // waiting room behavior
-    const waitingBanner = page.locator(
-      "text=/waiting for the host|host has joined|will let you in soon/i"
+    await nameField.fill(displayName);
+    log.info(
+      { sessionId: options.sessionId, name: options.displayName },
+      "zoom_bot_prejoin_name_filled"
     );
+
+    const joinBtn = page.getByRole("button", { name: /^join$/i });
+    await joinBtn.waitFor({ state: "visible", timeout: 10_000 });
+    await joinBtn.click();
+    log.info({ sessionId: options.sessionId }, "zoom_bot_prejoin_join_clicked");
+
+    // Best-effort prejoin mute. The button label varies across Zoom builds.
+    // If we can't find it, log and continue — the bot will join with mic on,
+    // which is fine for first checkpoints.
+    const muteCandidate = page.locator("button").filter({
+      hasText:
+        /^(mute|unmute|turn off (microphone|mic)|microphone|audio)$/i,
+    }).first();
+    try {
+      await muteCandidate.waitFor({ state: "visible", timeout: 5_000 });
+      await muteCandidate.click({ timeout: 3_000 });
+      log.info({ sessionId: options.sessionId }, "zoom_bot_prejoin_mute_clicked");
+    } catch (err) {
+      log.warn(
+        { sessionId: options.sessionId, msg: err?.message },
+        "zoom_bot_prejoin_mute_skipped"
+      );
+      // intentionally continue — joining with mic on is acceptable for now
+    }
+
+    // Confirm we're inside the meeting by waiting for the bottom toolbar.
+    // The button label depends on camera state ("Stop video" if camera on,
+    // "Start video" if camera off). Headless bots usually have no camera.
+    try {
+      await page
+        .locator("button")
+        .filter({ hasText: /start video|stop video/i })
+        .first()
+        .waitFor({ timeout: 30000 });
+    } catch (err) {
+      const screenshotPath = path.join(
+        process.cwd(),
+        "transcripts",
+        `join_failed_${Date.now()}.png`
+      );
+      await page
+        .screenshot({ path: screenshotPath, fullPage: true })
+        .catch(() => {});
+      log.error(
+        { err: err.message, screenshot: screenshotPath },
+        "zoom_bot_join_detect_failed"
+      );
+      throw err;
+    }
+    log.info({ sessionId: options.sessionId }, "zoom_bot_inside_meeting");
+
+    // Optional waiting-room handler. If we're already in the meeting (which
+    // is the normal case when the host is present), this text never appears
+    // and we just continue. Only useful when the host hasn't joined yet.
+    let sawWaitingRoomBanner = false;
+    try {
+      await page
+        .locator(
+          "text=/waiting for the host|host has joined|will let you in soon/i"
+        )
+        .waitFor({ state: "visible", timeout: 3_000 });
+      sawWaitingRoomBanner = true;
+      log.info({ sessionId: options.sessionId }, "zoom_bot_was_in_waiting_room");
+    } catch {
+      // Not in a waiting room — already inside the meeting. Continue.
+    }
+
     const inMeetingButton = page.getByRole("button", {
       name: /mute my microphone/i,
     });
 
-    // bot will either join immediately or be placed in the waiting room
-    transition(
-      await Promise.race([
-        waitingBanner
-          .waitFor({ timeout: 15_000 })
-          .then(() => BotState.IN_WAITING_ROOM),
-        inMeetingButton
-          .waitFor({ timeout: 15_000 })
-          .then(() => BotState.IN_CALL),
-      ])
-    );
-
-    // start waiting room timeout if we're in the waiting room
-    if (state === BotState.IN_WAITING_ROOM) {
+    if (sawWaitingRoomBanner) {
+      transition(BotState.IN_WAITING_ROOM);
       console.log(`⏳  host absent; will wait ${waitRoomLimitMs / 60000} min`);
       await Promise.race([
         inMeetingButton.waitFor({ timeout: waitRoomLimitMs }),
@@ -129,6 +209,8 @@ async function runZoomBot(origUrl, transcriptPath, headless, options = {}) {
           )
         ),
       ]);
+      transition(BotState.IN_CALL);
+    } else {
       transition(BotState.IN_CALL);
     }
 

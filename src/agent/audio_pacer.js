@@ -6,11 +6,12 @@ const FRAME_BYTES = 640;
  */
 class AudioPacer {
   /**
-   * @param {{ sink: { write: (b: Buffer) => void | Promise<void>, flush: () => void | Promise<void> }, cancel: import('./cancel').CancelToken }} opts
+   * @param {{ sink: { write: (b: Buffer) => void | Promise<void>, flush: () => void | Promise<void> }, cancel: import('./cancel').CancelToken, log?: { warn: (o: object, m: string) => void } }} opts
    */
   constructor(opts) {
     this.sink = opts.sink;
     this.cancel = opts.cancel;
+    this.log = opts.log;
     /** @type {Buffer} */
     this._pending = Buffer.alloc(0);
     /** @type {ReturnType<typeof setInterval> | null} */
@@ -20,7 +21,9 @@ class AudioPacer {
   _ensureTick() {
     if (this._interval) return;
     this._interval = setInterval(() => {
-      this._tick().catch(() => {});
+      this._tick().catch((err) => {
+        this.log?.warn?.({ err }, "pacer_tick_error");
+      });
     }, FRAME_MS);
   }
 

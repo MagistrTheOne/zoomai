@@ -41,35 +41,46 @@ async function* streamSpeak(opts) {
   const { tts: model, voice } = getResolvedModels();
   const instructions = opts.instructions;
 
-  let buf = "";
-  for await (const delta of opts.textIter) {
-    opts.cancel.throwIfCancelled();
-    buf += delta;
-    const m = buf.match(/([.!?]\s+|$)/);
-    if (m && m.index !== undefined && m.index > 0) {
-      const slice = buf.slice(0, m.index + 1).trim();
-      buf = buf.slice(m.index + 1);
-      if (slice.length > 0) {
-        yield* synthChunk({
-          apiKey,
-          model,
-          voice,
-          input: slice,
-          cancel: opts.cancel,
-          instructions,
-        });
+  try {
+    let buf = "";
+    for await (const delta of opts.textIter) {
+      opts.cancel.throwIfCancelled();
+      buf += delta;
+      const m = buf.match(/([.!?]\s+|$)/);
+      if (m && m.index !== undefined && m.index > 0) {
+        const slice = buf.slice(0, m.index + 1).trim();
+        buf = buf.slice(m.index + 1);
+        if (slice.length > 0) {
+          yield* synthChunk({
+            apiKey,
+            model,
+            voice,
+            input: slice,
+            cancel: opts.cancel,
+            instructions,
+          });
+        }
       }
     }
-  }
-  if (buf.trim().length > 0) {
-    yield* synthChunk({
-      apiKey,
-      model,
-      voice,
-      input: buf.trim(),
-      cancel: opts.cancel,
-      instructions,
-    });
+    if (buf.trim().length > 0) {
+      yield* synthChunk({
+        apiKey,
+        model,
+        voice,
+        input: buf.trim(),
+        cancel: opts.cancel,
+        instructions,
+      });
+    }
+  } catch (err) {
+    if (
+      err.name === "AbortError" ||
+      opts.cancel.cancelled ||
+      err.code === "CANCELLED"
+    ) {
+      return;
+    }
+    throw err;
   }
 }
 
@@ -81,39 +92,50 @@ async function* synthChunk(opts) {
   const ac = new AbortController();
   const unsub = opts.cancel.subscribe(() => ac.abort());
   try {
-    const body = {
-      model: opts.model,
-      voice: opts.voice,
-      input: opts.input,
-      response_format: "pcm",
-    };
-    if (opts.instructions && String(opts.instructions).trim()) {
-      body.instructions = String(opts.instructions).trim();
-    }
+    try {
+      const body = {
+        model: opts.model,
+        voice: opts.voice,
+        input: opts.input,
+        response_format: "pcm",
+      };
+      if (opts.instructions && String(opts.instructions).trim()) {
+        body.instructions = String(opts.instructions).trim();
+      }
 
-    const res = await fetch("https://api.openai.com/v1/audio/speech", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${opts.apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
-      signal: ac.signal,
-    });
+      const res = await fetch("https://api.openai.com/v1/audio/speech", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${opts.apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+        signal: ac.signal,
+      });
 
-    if (!res.ok) {
-      const t = await res.text();
-      throw new Error(`TTS HTTP ${res.status}: ${t.slice(0, 400)}`);
-    }
+      if (!res.ok) {
+        const t = await res.text();
+        throw new Error(`TTS HTTP ${res.status}: ${t.slice(0, 400)}`);
+      }
 
-    const ab = await res.arrayBuffer();
-    const acc = Buffer.from(ab);
+      const ab = await res.arrayBuffer();
+      const acc = Buffer.from(ab);
 
-    const pcm16 = resample24kTo16kPcm16(acc);
-    const frame = 640;
-    for (let i = 0; i < pcm16.length; i += frame) {
-      opts.cancel.throwIfCancelled();
-      yield pcm16.subarray(i, i + frame);
+      const pcm16 = resample24kTo16kPcm16(acc);
+      const frame = 640;
+      for (let i = 0; i < pcm16.length; i += frame) {
+        opts.cancel.throwIfCancelled();
+        yield pcm16.subarray(i, i + frame);
+      }
+    } catch (err) {
+      if (
+        err.name === "AbortError" ||
+        opts.cancel.cancelled ||
+        err.code === "CANCELLED"
+      ) {
+        return;
+      }
+      throw err;
     }
   } finally {
     unsub();

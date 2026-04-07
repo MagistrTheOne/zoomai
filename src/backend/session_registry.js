@@ -1,4 +1,5 @@
 const { randomUUID } = require("crypto");
+const metrics = require("../agent/metrics");
 
 class SessionRegistry {
   constructor() {
@@ -29,14 +30,34 @@ class SessionRegistry {
    */
   set(id, worker) {
     this.sessions.set(id, worker);
+    metrics.activeSessions.inc();
   }
 
   newSessionId() {
     return randomUUID();
   }
 
+  /**
+   * @param {string} id
+   * @returns {boolean} true if a session was removed
+   */
   unregister(id) {
-    this.sessions.delete(id);
+    const removed = this.sessions.delete(id);
+    if (removed) metrics.activeSessions.dec();
+    return removed;
+  }
+
+  /**
+   * Single exit path: unregister (dec gauge) + release slot. Safe to call
+   * from run().finally, DELETE .finally, or shutdown — second call is a no-op.
+   * @param {string} id
+   * @param {number} slot
+   * @returns {boolean} true if the session was removed this call
+   */
+  releaseSession(id, slot) {
+    const removed = this.unregister(id);
+    if (removed) this.releaseSlot(slot);
+    return removed;
   }
 
   get(id) {
@@ -45,6 +66,11 @@ class SessionRegistry {
 
   get size() {
     return this.sessions.size;
+  }
+
+  /** @returns {import('../agent/session_worker').SessionWorker[]} */
+  listAll() {
+    return [...this.sessions.values()];
   }
 }
 

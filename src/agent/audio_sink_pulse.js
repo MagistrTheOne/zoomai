@@ -72,11 +72,12 @@ function unloadPulseModules(sinkModule, sourceModule) {
  */
 class PulseAudioSink {
   /**
-   * @param {{ slot: number, ownModules?: boolean }} opts
+   * @param {{ slot: number, ownModules?: boolean, log?: ReturnType<typeof import('./logger').createLogger> }} opts
    */
   constructor(opts) {
     this.slot = opts.slot;
     this.ownModules = opts.ownModules !== false;
+    this.log = opts.log;
     this._mods = loadPulseModulesForSlot(opts.slot);
     this.sinkName = this._mods.sinkName;
     this.micName = this._mods.micName;
@@ -105,8 +106,15 @@ class PulseAudioSink {
       ],
       { stdio: ["pipe", "ignore", "pipe"] }
     );
-    this._pacat.stderr?.on("data", () => {});
-    this._pacat.on("error", () => {});
+    this._pacat.stderr?.on("data", (chunk) =>
+      this.log?.debug?.(
+        { chunk: chunk.toString().slice(0, 200) },
+        "pacat_stderr"
+      )
+    );
+    this._pacat.on("error", (err) =>
+      this.log?.warn?.({ err }, "pacat_process_error")
+    );
   }
 
   /**

@@ -1,55 +1,12 @@
 const express = require("express");
 const path = require("path");
 const fs = require("fs");
-const client = require("prom-client");
 const { SessionWorker } = require("../agent/session_worker");
+const metrics = require("../agent/metrics");
 const { createLogger } = require("../agent/logger");
 const { validateOpenAIChainOrThrow } = require("../agent/openai_validate");
 
 const log = createLogger();
-
-const registry = new client.Registry();
-client.collectDefaultMetrics({ register: registry });
-
-const e2eLatency = new client.Histogram({
-  name: "nullxes_e2e_latency_ms",
-  help: "End-to-end latency ms (placeholder)",
-  buckets: [50, 100, 250, 500, 1000, 1500, 3000],
-  registers: [registry],
-});
-
-const sttFinalLatency = new client.Histogram({
-  name: "nullxes_stt_final_latency_ms",
-  help: "STT final latency ms (placeholder)",
-  buckets: [100, 200, 400, 800, 1600],
-  registers: [registry],
-});
-
-const llmTtft = new client.Histogram({
-  name: "nullxes_llm_ttft_ms",
-  help: "LLM time to first token ms (placeholder)",
-  buckets: [50, 100, 200, 400, 800],
-  registers: [registry],
-});
-
-const ttsTtfb = new client.Histogram({
-  name: "nullxes_tts_ttfb_ms",
-  help: "TTS time to first byte ms (placeholder)",
-  buckets: [20, 50, 100, 200, 400],
-  registers: [registry],
-});
-
-const bargeInTotal = new client.Counter({
-  name: "nullxes_barge_in_total",
-  help: "Barge-in events",
-  registers: [registry],
-});
-
-const activeSessions = new client.Gauge({
-  name: "nullxes_active_sessions",
-  help: "Active sessions",
-  registers: [registry],
-});
 
 /**
  * @param {{ sessionRegistry: import('./session_registry').SessionRegistry, transcriptsDir: string }} deps
@@ -62,8 +19,8 @@ function createControlRouter(deps) {
   });
 
   r.get("/metrics", async (_req, res) => {
-    res.set("Content-Type", registry.contentType);
-    res.end(await registry.metrics());
+    res.set("Content-Type", metrics.register.contentType);
+    res.end(await metrics.register.metrics());
   });
 
   r.post("/sessions", express.json(), async (req, res) => {
@@ -131,15 +88,12 @@ function createControlRouter(deps) {
     });
 
     deps.sessionRegistry.set(sessionId, worker);
-    activeSessions.set(deps.sessionRegistry.size);
 
     worker
       .run()
       .catch((e) => log.error({ err: String(e), sessionId }, "session failed"))
       .finally(() => {
-        deps.sessionRegistry.unregister(sessionId);
-        deps.sessionRegistry.releaseSlot(slot);
-        activeSessions.set(deps.sessionRegistry.size);
+        deps.sessionRegistry.releaseSession(sessionId, slot);
       });
 
     res.json({ sessionId, status: "started" });
@@ -159,13 +113,20 @@ function createControlRouter(deps) {
   });
 
   r.delete("/sessions/:id", (req, res) => {
-    const w = deps.sessionRegistry.get(req.params.id);
+    const id = req.params.id;
+    const w = deps.sessionRegistry.get(id);
     if (!w) return res.status(404).json({ error: "not found" });
-    w.sessionCancel.cancel();
-    res.json({ ok: true });
+    res.status(202).json({ status: "shutting_down" });
+    w.gracefulShutdown("operator_stop")
+      .catch((e) =>
+        log.error({ err: String(e), sessionId: id }, "graceful_shutdown_failed")
+      )
+      .finally(() => {
+        deps.sessionRegistry.releaseSession(id, w.slot);
+      });
   });
 
-  return { router: r, metrics: { e2eLatency, sttFinalLatency, llmTtft, ttsTtfb, bargeInTotal, activeSessions } };
+  return { router: r };
 }
 
 module.exports = { createControlRouter };

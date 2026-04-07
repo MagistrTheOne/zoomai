@@ -1,5 +1,5 @@
 const WebSocket = require("ws");
-const OpenAI = require("openai/index.mjs");
+const { OpenAI } = require("openai");
 const fs = require("fs");
 const fsp = require("fs").promises;
 const os = require("os");
@@ -133,40 +133,51 @@ async function* transcribeOneUtteranceHttpStream(pcm16, opts) {
   const ac = new AbortController();
   const unsub = cancel.subscribe(() => ac.abort());
   try {
-    const res = await fetch("https://api.openai.com/v1/audio/transcriptions", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${apiKey}` },
-      body: form,
-      signal: ac.signal,
-    });
-    if (!res.ok) {
-      const t = await res.text();
-      log.warn(
-        { status: res.status, body: t.slice(0, 500) },
-        "transcription HTTP error"
-      );
-      throw new Error(`transcription HTTP ${res.status}: ${t.slice(0, 200)}`);
-    }
-    if (!res.body) {
-      throw new Error("transcription response has no body");
-    }
-    const state = { accumulated: "" };
-    for await (const seg of parseSseResponseBody(
-      res.body,
-      cancel,
-      state,
-      onPartial,
-      log
-    )) {
-      if (seg.isFinal) {
-        yield {
-          ...seg,
-          vadSpeechEndMs,
-          sttFinalMs: Date.now(),
-        };
-      } else {
-        yield seg;
+    try {
+      const res = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${apiKey}` },
+        body: form,
+        signal: ac.signal,
+      });
+      if (!res.ok) {
+        const t = await res.text();
+        log.warn(
+          { status: res.status, body: t.slice(0, 500) },
+          "transcription HTTP error"
+        );
+        throw new Error(`transcription HTTP ${res.status}: ${t.slice(0, 200)}`);
       }
+      if (!res.body) {
+        throw new Error("transcription response has no body");
+      }
+      const state = { accumulated: "" };
+      for await (const seg of parseSseResponseBody(
+        res.body,
+        cancel,
+        state,
+        onPartial,
+        log
+      )) {
+        if (seg.isFinal) {
+          yield {
+            ...seg,
+            vadSpeechEndMs,
+            sttFinalMs: Date.now(),
+          };
+        } else {
+          yield seg;
+        }
+      }
+    } catch (err) {
+      if (
+        err.name === "AbortError" ||
+        cancel.cancelled ||
+        err.code === "CANCELLED"
+      ) {
+        return;
+      }
+      throw err;
     }
   } finally {
     unsub();
@@ -175,7 +186,7 @@ async function* transcribeOneUtteranceHttpStream(pcm16, opts) {
 
 /**
  * @param {AsyncIterable<Buffer>} frameIter
- * @param {{ cancel: import('./cancel').CancelToken, sessionId?: string, onPartial?: (t: string) => void }} opts
+ * @param {{ cancel: import('./cancel').CancelToken, sessionId?: string, onPartial?: (t: string) => void, onSpeechStart?: () => void }} opts
  */
 async function* streamTranscribeHttpStream(frameIter, opts) {
   const log = createLogger(opts.sessionId);
@@ -186,7 +197,10 @@ async function* streamTranscribeHttpStream(frameIter, opts) {
   }
   const model = getSttModel();
 
-  for await (const utterancePcm of segmentUtterances(frameIter, cancel)) {
+  for await (const utterancePcm of segmentUtterances(frameIter, {
+    cancel,
+    onSpeechStart: opts.onSpeechStart,
+  })) {
     cancel.throwIfCancelled();
     const vadSpeechEndMs = Date.now();
     yield* transcribeOneUtteranceHttpStream(utterancePcm, {
@@ -202,7 +216,7 @@ async function* streamTranscribeHttpStream(frameIter, opts) {
 
 /**
  * @param {AsyncIterable<Buffer>} frameIter PCM16 20ms frames
- * @param {{ cancel: import('./cancel').CancelToken, sessionId?: string, onPartial?: (t: string) => void }} opts
+ * @param {{ cancel: import('./cancel').CancelToken, sessionId?: string, onPartial?: (t: string) => void, onSpeechStart?: () => void }} opts
  * @returns {AsyncGenerator<{ text: string, isFinal: boolean, confidence?: number, tStart?: number, tEnd?: number }>}
  */
 async function* streamTranscribe(frameIter, opts) {
@@ -246,6 +260,7 @@ async function* streamTranscribe(frameIter, opts) {
 
 async function* streamTranscribeRealtime(frameIter, opts) {
   const { cancel, model, onPartial } = opts;
+  const log = createLogger(opts.sessionId);
   const apiKey = process.env.OPENAI_API_KEY;
   const realtimeModel = process.env.OPENAI_REALTIME_MODEL?.trim();
   if (!realtimeModel) {
@@ -373,7 +388,9 @@ async function* streamTranscribeRealtime(frameIter, opts) {
     } catch {
       /* ignore */
     }
-    await sender.catch(() => {});
+    await sender.catch((err) =>
+      log.warn({ err }, "stt_realtime_sender_error")
+    );
   }
 }
 

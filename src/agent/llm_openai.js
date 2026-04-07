@@ -1,10 +1,10 @@
-const OpenAI = require("openai/index.mjs");
+const { OpenAI } = require("openai");
 const { getResolvedModels } = require("./config");
 
 // verify against openai@^4.77
 
 /**
- * @param {{ messages: import('openai/index.mjs').OpenAI.Chat.ChatCompletionMessageParam[], cancel: import('./cancel').CancelToken }} opts
+ * @param {{ messages: import('openai').OpenAI.Chat.ChatCompletionMessageParam[], cancel: import('./cancel').CancelToken }} opts
  */
 async function* streamReply(opts) {
   const apiKey = process.env.OPENAI_API_KEY;

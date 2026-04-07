@@ -1,4 +1,4 @@
-const OpenAI = require("openai/index.mjs");
+const { OpenAI } = require("openai");
 const { pcm16ToWav } = require("./stt_openai");
 const { getResolvedModels } = require("./config");
 const { createLogger } = require("./logger");

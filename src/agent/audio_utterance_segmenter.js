@@ -20,10 +20,30 @@ function frameRmsNorm(frame) {
 }
 
 /**
- * @param {AsyncIterable<Buffer>} frameIter
- * @param {import('./cancel').CancelToken} cancel
+ * @param {import('./cancel').CancelToken} x
  */
-async function* segmentUtterances(frameIter, cancel) {
+function isCancelToken(x) {
+  return (
+    x &&
+    typeof x.throwIfCancelled === "function" &&
+    typeof x.cancel === "function"
+  );
+}
+
+/**
+ * @param {AsyncIterable<Buffer>} frameIter
+ * @param {import('./cancel').CancelToken | { cancel: import('./cancel').CancelToken, onSpeechStart?: () => void }} cancelOrOpts
+ */
+async function* segmentUtterances(frameIter, cancelOrOpts) {
+  let cancel;
+  /** @type {(() => void) | undefined} */
+  let onSpeechStart;
+  if (isCancelToken(cancelOrOpts)) {
+    cancel = cancelOrOpts;
+  } else {
+    cancel = cancelOrOpts.cancel;
+    onSpeechStart = cancelOrOpts.onSpeechStart;
+  }
   const threshold = Number(process.env.OPENAI_STT_VAD_RMS_THRESHOLD || 0.015);
   const silenceMs = Number(process.env.OPENAI_STT_SILENCE_MS || 450);
   const minUtteranceMs = Number(process.env.OPENAI_STT_MIN_UTTERANCE_MS || 120);
@@ -55,6 +75,13 @@ async function* segmentUtterances(frameIter, cancel) {
           buf = Buffer.from(frame);
           framesInUtterance = 1;
           silenceRun = 0;
+          if (typeof onSpeechStart === "function") {
+            try {
+              onSpeechStart();
+            } catch {
+              /* fire-and-forget */
+            }
+          }
         }
         continue;
       }

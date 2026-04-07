@@ -291,18 +291,27 @@ async function startCaptionLogging(page) {
 
 async function leaveMeeting(page) {
   try {
-    const leave = page
-      .getByRole("button", { name: /leave|end meeting|leave meeting/i })
+    const leaveBtn = page
+      .getByRole("button", {
+        name: /leave|end meeting|leave meeting|завершить|покинуть|выйти/i,
+      })
       .first();
-    await leave.click({ timeout: 8000 });
-    const confirm = page.getByRole("button", {
-      name: /leave meeting|^leave$/i,
-    });
-    if (await confirm.isVisible().catch(() => false)) {
-      await confirm.click();
+    await leaveBtn.waitFor({ state: "visible", timeout: 5_000 });
+    await leaveBtn.click({ timeout: 5_000 });
+
+    try {
+      const confirm = page
+        .getByRole("button", {
+          name: /leave meeting|leave|выйти из собрания|выйти|покинуть собрание/i,
+        })
+        .first();
+      await confirm.waitFor({ state: "visible", timeout: 3_000 });
+      await confirm.click({ timeout: 5_000 });
+    } catch {
+      // No confirm dialog — already left
     }
   } catch (e) {
-    console.warn("[leaveMeeting]", e);
+    console.warn("[leaveMeeting]", e?.message ?? e);
   }
 }
 
