@@ -1,86 +1,148 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ru">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Recall.ai Sample App</title>
+    <meta
+      name="description"
+      content="NULLXES AI+ — приглашение голосового агента в Zoom"
+    />
+    <title>NULLXES AI+ · Zoom Agent</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500&display=swap"
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Outfit:wght@300;400;600;700&display=swap"
       rel="stylesheet"
     />
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
-    <div class="container">
-      <form id="simpleForm">
-        <div class="heading">
-          <div class="title">Zoom Bot Demo</div>
-          <div class="logo"></div>
+    <div class="shell">
+      <header class="brand">
+        <div class="brand-mark" aria-hidden="true">N</div>
+        <div class="brand-text">
+          <h1>NULLXES<span class="brand-plus"> AI+</span></h1>
+          <p class="brand-tagline">
+            Голосовой агент для Zoom · панель команды
+          </p>
+          <div class="brand-badge">Live session</div>
         </div>
-        <input
-          type="text"
-          id="userInput"
-          name="userInput"
-          placeholder="Add Zoom URL"
-          required
-        />
-        <button type="submit">Invite Bot</button>
-        <div class="message" id="message"></div>
-      </form>
-    </div>
+      </header>
 
-    <div id="transcript-container" style="display: none">
-      <div class="transcript-header">
-        <h2>Live Transcript</h2>
-        <div id="transcript-status"></div>
+      <section class="panel" id="invite-panel">
+        <p class="panel-hint">
+          Вставьте <strong>ссылку на встречу Zoom</strong> (режим веб-клиента).
+          После приглашения бот зайдёт в звонок — <strong>разрешите микрофон</strong>
+          в браузере на стороне бота, чтобы его было слышно участникам.
+        </p>
+
+        <form id="simpleForm" autocomplete="off">
+          <div class="label-row">
+            <label for="userInput">Zoom meeting URL</label>
+          </div>
+          <div class="input-wrap">
+            <input
+              type="text"
+              id="userInput"
+              name="userInput"
+              placeholder="https://zoom.us/j/… или /wc/join/…"
+              required
+            />
+          </div>
+          <button type="submit" class="btn-primary">
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke-width="2"
+              stroke="currentColor"
+              aria-hidden="true"
+            >
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                d="M15.75 9V5.25A2.25 2.25 0 0013.5 3h-6a2.25 2.25 0 00-2.25 2.25v13.5A2.25 2.25 0 007.5 21h6a2.25 2.25 0 002.25-2.25V15m3 0l3-3m0 0l-3-3m3 3H9"
+              />
+            </svg>
+            Пригласить бота в Zoom
+          </button>
+          <div class="message" id="message" role="status"></div>
+        </form>
+      </section>
+
+      <div id="transcript-container">
+        <div class="panel transcript-panel">
+          <div class="transcript-header">
+            <h2>Транскрипт в реальном времени</h2>
+            <div id="transcript-status"></div>
+          </div>
+          <div id="transcript-output" aria-live="polite">
+            <div class="transcript-empty" id="transcript-placeholder">
+              Ожидание реплик… как только бот и участники говорят, строки появятся здесь.
+            </div>
+          </div>
+        </div>
       </div>
-      <div id="transcript-output"></div>
+
+      <footer class="shell-footer">
+        NULLXES AI+ · backend <code style="opacity: 0.8">/api/invite_bot</code>
+      </footer>
     </div>
 
     <script>
       const form = document.getElementById("simpleForm");
       const responseEl = document.getElementById("message");
-      const mainContainer = document.querySelector(".container");
-      const transcriptContainer = document.getElementById(
-        "transcript-container"
-      );
+      const invitePanel = document.getElementById("invite-panel");
+      const transcriptContainer = document.getElementById("transcript-container");
       const transcriptOutput = document.getElementById("transcript-output");
       const transcriptStatus = document.getElementById("transcript-status");
+      const transcriptPlaceholder = document.getElementById("transcript-placeholder");
       let pollingInterval;
+
+      function setMessage(text, kind) {
+        responseEl.classList.remove("message--ok", "message--err", "message--pending");
+        if (!text && kind == null) {
+          responseEl.textContent = "";
+          responseEl.className = "message";
+          return;
+        }
+        responseEl.textContent = text;
+        responseEl.className = "message is-visible";
+        if (kind === "ok") responseEl.classList.add("message--ok");
+        else if (kind === "err") responseEl.classList.add("message--err");
+        else responseEl.classList.add("message--pending");
+      }
 
       form.addEventListener("submit", async (e) => {
         e.preventDefault();
-        const userInput = document.getElementById("userInput").value;
-        responseEl.textContent = "Inviting bot...";
-        responseEl.style.color = "black";
-        responseEl.style.display = "block";
+        const userInput = document.getElementById("userInput").value.trim();
+        setMessage("Приглашаем бота…", "pending");
 
         try {
           const response = await fetch("/api/invite_bot", {
             method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-            },
+            headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ meetingUrl: userInput }),
           });
           const data = await response.json();
           if (response.ok) {
-            mainContainer.style.display = "none";
+            invitePanel.style.display = "none";
             transcriptContainer.style.display = "flex";
-            transcriptStatus.textContent = `Bot ID: ${data.botId}`;
+            transcriptStatus.textContent = `session · ${data.botId}`;
+            if (transcriptPlaceholder) transcriptPlaceholder.remove();
             startPolling(data.botId);
+            setMessage("", null);
           } else {
-            responseEl.textContent = `Error: ${data.error || "Unknown error"}`;
+            setMessage(data.error || "Неизвестная ошибка", "err");
           }
         } catch (error) {
           console.error("Network error:", error);
-          responseEl.textContent = `Network error: ${error.message}`;
+          setMessage(`Сеть: ${error.message}`, "err");
         }
       });
 
       function startPolling(botId) {
         if (pollingInterval) clearInterval(pollingInterval);
-
         pollingInterval = setInterval(async () => {
           try {
             const res = await fetch(`/api/transcript/${botId}`);
@@ -92,15 +154,38 @@
         }, 3000);
       }
 
+      function isBotSpeaker(name) {
+        if (!name) return false;
+        const n = String(name).toLowerCase();
+        return (
+          n.includes("bot") ||
+          n.includes("nullxes") ||
+          n.includes("agent") ||
+          n.includes("ai")
+        );
+      }
+
       function renderTranscript(transcript) {
-        transcriptOutput.innerHTML = ""; // Clear previous content
-        transcript.forEach((chunk) => {
+        transcriptOutput.innerHTML = "";
+        if (!transcript.length) {
+          const empty = document.createElement("div");
+          empty.className = "transcript-empty";
+          empty.textContent =
+            "Пока пусто — бот подключается или ещё нет распознанной речи.";
+          transcriptOutput.appendChild(empty);
+          return;
+        }
+
+        transcript.forEach((chunk, index) => {
           const line = document.createElement("div");
           line.className = "transcript-line";
+          line.style.animationDelay = `${Math.min(index * 0.04, 0.5)}s`;
+          if (isBotSpeaker(chunk.speaker)) line.classList.add("line-bot");
+          else line.classList.add("line-human");
 
           const speaker = document.createElement("span");
           speaker.className = "speaker";
-          speaker.textContent = `${chunk.speaker}:`;
+          speaker.textContent = chunk.speaker || "—";
 
           const text = document.createElement("span");
           text.className = "text";
@@ -108,13 +193,14 @@
 
           const time = document.createElement("span");
           time.className = "time";
-          time.textContent = `[${chunk.time.toFixed(2)}s]`;
+          time.textContent =
+            typeof chunk.time === "number" ? `${chunk.time.toFixed(1)}s` : "";
 
           line.appendChild(speaker);
           line.appendChild(text);
+          line.appendChild(time);
           transcriptOutput.appendChild(line);
         });
-        // Scroll to the bottom
         transcriptOutput.scrollTop = transcriptOutput.scrollHeight;
       }
     </script>
