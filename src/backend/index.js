@@ -60,12 +60,15 @@ app.post("/api/invite_bot", (req, res) => {
   const botId = uuid.v4();
 
   if (!inviteBotViaDocker) {
+    const headless = process.env.HEADLESS !== "0";
     runZoomBot(
       meetingUrl,
       path.join(transcriptsDir, `${botId}.jsonl`),
-      false,
+      headless,
       {}
-    );
+    ).catch((err) => {
+      log.error({ err: String(err), botId }, "invite_bot_run_failed");
+    });
   } else {
     const botProcess = spawn(
       resolveDockerExecutable(),
