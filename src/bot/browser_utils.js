@@ -1,11 +1,37 @@
+/** EN + RU Zoom web: participants / side panel trigger (accessible name varies by locale). */
+const PARTICIPANTS_BUTTON_NAME =
+  /open the participants list|открыть список участников|участники(\s*\(\s*\d+\s*\))?|participants(\s*\(\s*\d+\s*\))?/i;
+
 // Observe participant list and build avatar→name / abbrev→name map
 async function startParticipantObserver(page) {
-  const participantsButton = page.getByRole("button", {
-    name: "open the participants list",
-  });
+  const candidates = [
+    page.getByRole("button", { name: PARTICIPANTS_BUTTON_NAME }),
+    page.locator('button[aria-label*="participant" i]'),
+    page.locator('button[aria-label*="участник" i]'),
+  ];
 
-  // double click since it doesn't open on the first click
-  await participantsButton.dblclick();
+  let opened = false;
+  for (const loc of candidates) {
+    const btn = loc.first();
+    try {
+      await btn.waitFor({ state: "visible", timeout: 15_000 });
+      try {
+        await btn.dblclick({ timeout: 8_000 });
+      } catch {
+        await btn.click({ timeout: 8_000 });
+      }
+      opened = true;
+      break;
+    } catch {
+      /* try next strategy */
+    }
+  }
+
+  if (!opened) {
+    console.warn(
+      "[participants] could not open participants panel (locale/UI?) — caption name map may be incomplete"
+    );
+  }
 
   await page.evaluate(() => {
     if (window.__participantMapObserver) return;
@@ -70,11 +96,7 @@ async function enableCaptions(page) {
     // double click since it doesn't open on the first click
     await moreButton.dblclick();
 
-    // 2. Click the "Captions" toggle in the menu.
-    await captionsItem.click();
-
-    // brief pause to let the UI register the first click before the second
-    await page.waitForTimeout(300);
+    // 2. Click the "Captions" toggle once — a second click would toggle off again.
     await captionsItem.click();
 
     // 3. Detect whether a confirmation toast appears – if so, captions are
@@ -115,19 +137,8 @@ async function enableCaptions(page) {
   }
 }
 
+// Caption lines reach Node only via zoom_bot's page.on("console") (transcript + dedupe).
 async function startCaptionLogging(page) {
-  page.on("console", (msg) => {
-    const type = msg.type();
-    const text = msg.text();
-
-    // Relay browser console messages prefixed with "CAPTION: " back to Node.
-    if (type === "log" && text.startsWith("CAPTION: ")) {
-      // Remove "CAPTION: " prefix (9 characters) to keep output clean
-      console.log(text.slice(9));
-      return;
-    }
-  });
-
   await page.evaluate(() => {
     // Tear down any previous observers to avoid multiples (helps on reconnect).
     if (window.__zoomCaptionObservers) {

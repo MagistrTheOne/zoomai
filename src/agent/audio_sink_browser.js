@@ -19,6 +19,7 @@ const INJECT_SNIPPET = `(() => {
   const FRAME_SAMPLES = 320;
   const SR = ${INJECT_SR};
   const ctx = new AudioContext({ sampleRate: SR });
+  window.__nullxesAudioCtx = ctx;
   const dest = ctx.createMediaStreamDestination();
   const gain = ctx.createGain();
   gain.gain.value = 1.0;
@@ -62,7 +63,7 @@ const INJECT_SNIPPET = `(() => {
   }
 
   window.__nullxesPushPCM = function (b64) {
-    if (ctx.state === "suspended") {
+    if (ctx.state !== "running") {
       ctx.resume().catch(function () {});
     }
     const bin = atob(b64);

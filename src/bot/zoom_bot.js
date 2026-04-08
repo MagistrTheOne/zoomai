@@ -285,13 +285,15 @@ async function runZoomBot(origUrl, transcriptPath, headless, options = {}) {
 
     console.log("✅  inside meeting! hooking into captions...");
 
-    await ensureMicUnmutedForVoice(page, log, options.sessionId);
-
-    // handle extracting captions from the webpage
+    // UI clicks first: participant panel + captions can steal focus / show dialogs;
+    // unmute last so nothing after re-mutes the mic.
     await startParticipantObserver(page);
     await enableCaptions(page);
     const transcriptStartTs = Date.now();
     await startCaptionLogging(page, transcriptStartTs);
+
+    await new Promise((r) => setTimeout(r, 800));
+    await ensureMicUnmutedForVoice(page, log, options.sessionId);
 
     const meetingEndLocator = page
       .locator("text=/this meeting has been ended|you have been removed/i")

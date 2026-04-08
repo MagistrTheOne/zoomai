@@ -200,6 +200,18 @@ class SessionWorker {
   async runInCall(ctx) {
     const { page } = ctx;
     this._page = page;
+
+    try {
+      await page.evaluate(async () => {
+        const c = window.__nullxesAudioCtx;
+        if (c && c.state !== "running") {
+          await c.resume().catch(() => {});
+        }
+      });
+    } catch (e) {
+      this.log.warn({ err: String(e) }, "browser_audio_ctx_resume_failed");
+    }
+
     const t0 = Date.now();
     const ts = () => (Date.now() - t0) / 1000;
     this._tsFn = ts;
