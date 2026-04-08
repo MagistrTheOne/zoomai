@@ -31,9 +31,10 @@
 
       <section class="panel" id="invite-panel">
         <p class="panel-hint">
-          Вставьте <strong>ссылку на встречу Zoom</strong> (режим веб-клиента).
-          После приглашения бот зайдёт в звонок — <strong>разрешите микрофон</strong>
-          в браузере на стороне бота, чтобы его было слышно участникам.
+          Запускается <strong>полный голосовой агент</strong> (STT → LLM → TTS в Zoom через
+          <code>browser_injection</code>). Нужен <strong>OPENAI_API_KEY</strong> в окружении сервера.
+          Скрипт интервью — YAML (по умолчанию smoke). Старый режим только субтитров:
+          <code>POST /api/invite_bot</code>.
         </p>
 
         <form id="simpleForm" autocomplete="off">
@@ -47,6 +48,19 @@
               name="userInput"
               placeholder="https://zoom.us/j/… или /wc/join/…"
               required
+            />
+          </div>
+          <div class="label-row">
+            <label for="scriptPath">Script (YAML)</label>
+          </div>
+          <div class="input-wrap">
+            <input
+              type="text"
+              id="scriptPath"
+              name="scriptPath"
+              value="examples/smoke_test.yaml"
+              placeholder="examples/smoke_test.yaml"
+              title="Путь от корня репозитория или абсолютный"
             />
           </div>
           <button type="submit" class="btn-primary">
@@ -64,7 +78,7 @@
                 d="M15.75 9V5.25A2.25 2.25 0 0013.5 3h-6a2.25 2.25 0 00-2.25 2.25v13.5A2.25 2.25 0 007.5 21h6a2.25 2.25 0 002.25-2.25V15m3 0l3-3m0 0l-3-3m3 3H9"
               />
             </svg>
-            Пригласить бота в Zoom
+            Запустить голосового агента
           </button>
           <div class="message" id="message" role="status"></div>
         </form>
@@ -85,7 +99,7 @@
       </div>
 
       <footer class="shell-footer">
-        NULLXES AI+ · backend <code>/api/invite_bot</code>
+        NULLXES AI+ · <code>POST /sessions</code> · captions-only <code>/api/invite_bot</code>
       </footer>
     </div>
 
@@ -116,24 +130,37 @@
       form.addEventListener("submit", async (e) => {
         e.preventDefault();
         const userInput = document.getElementById("userInput").value.trim();
-        setMessage("Приглашаем бота…", "pending");
+        const scriptPath =
+          document.getElementById("scriptPath").value.trim() ||
+          "examples/smoke_test.yaml";
+        setMessage("Запуск сессии агента…", "pending");
 
         try {
-          const response = await fetch("/api/invite_bot", {
+          const response = await fetch("/sessions", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ meetingUrl: userInput }),
+            body: JSON.stringify({
+              meetingUrl: userInput,
+              scriptPath,
+              maxDurationSeconds: 900,
+            }),
           });
           const data = await response.json();
           if (response.ok) {
+            const sid = data.sessionId;
             invitePanel.style.display = "none";
             transcriptContainer.style.display = "flex";
-            transcriptStatus.textContent = `session · ${data.botId}`;
+            transcriptStatus.textContent = `voice session · ${sid}`;
             if (transcriptPlaceholder) transcriptPlaceholder.remove();
-            startPolling(data.botId);
+            startPolling(sid);
             setMessage("", null);
           } else {
-            setMessage(data.error || "Неизвестная ошибка", "err");
+            setMessage(
+              typeof data.error === "string"
+                ? data.error
+                : JSON.stringify(data.error || data),
+              "err"
+            );
           }
         } catch (error) {
           console.error("Network error:", error);
@@ -141,11 +168,11 @@
         }
       });
 
-      function startPolling(botId) {
+      function startPolling(sessionId) {
         if (pollingInterval) clearInterval(pollingInterval);
         pollingInterval = setInterval(async () => {
           try {
-            const res = await fetch(`/api/transcript/${botId}`);
+            const res = await fetch(`/api/transcript/${sessionId}`);
             const transcript = await res.json();
             renderTranscript(transcript);
           } catch (err) {

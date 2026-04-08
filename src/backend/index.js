@@ -149,6 +149,9 @@ const { router: controlRouter } = createControlRouter({
   transcriptsDir,
 });
 
+/** Same routes on :PORT (UI + curl без второго origin) и на :CONTROL_PORT для ops. */
+app.use(controlRouter);
+
 const controlApp = express();
 controlApp.use(controlRouter);
 
