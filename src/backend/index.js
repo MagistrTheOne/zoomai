@@ -23,10 +23,17 @@ log.info(
   "audio_out_mode_active"
 );
 
+/** POST /api/invite_bot: Docker only when USE_DOCKER_BOT=true (image zoom-bot + daemon). Default: in-process. */
+const inviteBotViaDocker =
+  process.env.USE_DOCKER_BOT === "true" && process.env.DEBUG !== "true";
+log.info(
+  { transport: inviteBotViaDocker ? "docker" : "in_process" },
+  "invite_bot_transport"
+);
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 const CONTROL_PORT = Number(process.env.CONTROL_PORT || 8080);
-const DEBUG = process.env.DEBUG || false;
 
 const sessionRegistry = new SessionRegistry();
 
@@ -52,7 +59,7 @@ app.post("/api/invite_bot", (req, res) => {
 
   const botId = uuid.v4();
 
-  if (DEBUG === "true") {
+  if (!inviteBotViaDocker) {
     runZoomBot(
       meetingUrl,
       path.join(transcriptsDir, `${botId}.jsonl`),
