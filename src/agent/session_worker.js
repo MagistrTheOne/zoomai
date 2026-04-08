@@ -176,13 +176,27 @@ class SessionWorker {
       sessionId: this.sessionId,
       cancelToken: this.sessionCancel,
       displayName: this.displayName,
-      agent: { runInCall: (ctx) => this.runInCall(ctx) },
+      agent: {
+        preinjectAudio: (page) => this.preinjectAudio(page),
+        runInCall: (ctx) => this.runInCall(ctx),
+      },
     });
   }
 
   /**
    * @param {{ page: import('playwright-core').Page }} ctx
    */
+  /**
+   * Register browser audio hook before page.goto (zoom_bot) so Zoom binds mic to TTS stream.
+   * @param {import('playwright-core').Page} page
+   */
+  async preinjectAudio(page) {
+    const mode = process.env.AUDIO_OUT_MODE || "browser_injection";
+    if (mode !== "browser_injection") return;
+    await setupBrowserAudioSink(page);
+    this.log.info({}, "browser_audio_sink_preinjected");
+  }
+
   async runInCall(ctx) {
     const { page } = ctx;
     this._page = page;
@@ -215,12 +229,12 @@ class SessionWorker {
     }, 1000);
 
     const mode = process.env.AUDIO_OUT_MODE || "browser_injection";
-    if (mode === "browser_injection") {
-      await setupBrowserAudioSink(page);
-    }
 
     await getOrCreateAudioBridge();
     const wsBase = `ws://127.0.0.1:${getBridgePort()}`;
+    // STT capture: getUserMedia runs with __nullxesBypassFakeMic (real/fake device).
+    // Zoom's uplink already used hooked GUM at join; this call is independent. If this
+    // often fails in logs, check timing/network — not a race with Zoom's first GUM.
     try {
       await injectMicCapture(page, {
         wsUrl: wsBase,

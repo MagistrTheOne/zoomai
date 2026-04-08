@@ -17,26 +17,81 @@ const {
 } = require("./browser_utils.js");
 const { createLogger } = require("../agent/logger");
 
+/** EN/RU (and common) accessible names for "unmute mic" in Zoom web client. */
+const MIC_UNMUTE_NAME_RE =
+  /unmute your microphone|unmute my microphone|\bunmute\b|turn on (?:the )?microphone|включить звук|включить микрофон|включить мик\b/i;
+
 /**
- * Zoom often joins guests muted. Click Unmute so browser_injection / TTS is audible.
+ * Close banners that steal focus (e.g. live transcription / OK).
+ * @param {import("playwright-core").Page} page
+ * @param {ReturnType<createLogger>} log
+ * @param {string} [sessionId]
+ */
+async function dismissZoomFocusBlockers(page, log, sessionId) {
+  const dismissers = [
+    page.getByRole("button", { name: /^ok$|^ок$/i }),
+    page.getByRole("button", { name: /got it|понятно|пропустить|^да$/i }),
+  ];
+  for (let round = 0; round < 4; round++) {
+    let clicked = false;
+    for (const loc of dismissers) {
+      try {
+        const b = loc.first();
+        await b.waitFor({ state: "visible", timeout: 1_200 });
+        await b.click({ timeout: 2_000 });
+        log.info({ sessionId, round }, "zoom_bot_focus_blocker_dismissed");
+        clicked = true;
+        await new Promise((r) => setTimeout(r, 350));
+        break;
+      } catch {
+        /* next */
+      }
+    }
+    if (!clicked) break;
+  }
+}
+
+/**
+ * Zoom often joins guests muted. Click Unmute / «Включить звук» so TTS is audible.
+ * Tries visible toolbar buttons (DOM order can hide English match on RU UI).
  * @param {import("playwright-core").Page} page
  * @param {ReturnType<createLogger>} log
  * @param {string} [sessionId]
  */
 async function ensureMicUnmutedForVoice(page, log, sessionId) {
-  const unmute = page.getByRole("button", {
-    name: /unmute.*microphone|unmute your microphone|unmute my microphone|^unmute$/i,
-  });
+  await dismissZoomFocusBlockers(page, log, sessionId);
+
+  const candidates = page.getByRole("button", { name: MIC_UNMUTE_NAME_RE });
+  let clicked = false;
+  let n = 0;
   try {
-    const btn = unmute.first();
-    await btn.waitFor({ state: "visible", timeout: 8_000 });
-    await btn.click({ timeout: 4_000 });
-    log.info({ sessionId }, "zoom_bot_in_call_unmute_clicked");
+    await new Promise((r) => setTimeout(r, 400));
+    n = await candidates.count();
+    for (let i = n - 1; i >= 0; i--) {
+      const btn = candidates.nth(i);
+      try {
+        if (!(await btn.isVisible())) continue;
+        await btn.click({ timeout: 4_000 });
+        clicked = true;
+        log.info({ sessionId, index: i }, "zoom_bot_in_call_unmute_clicked");
+        break;
+      } catch {
+        /* try previous */
+      }
+    }
+    if (!clicked && n > 0) {
+      await candidates.first().click({ timeout: 4_000 });
+      clicked = true;
+      log.info({ sessionId }, "zoom_bot_in_call_unmute_clicked_fallback_first");
+    }
   } catch (err) {
-    log.info(
-      { sessionId, msg: err?.message },
-      "zoom_bot_in_call_mic_unmute_skipped"
+    log.warn(
+      { sessionId, msg: err?.message, clicked, n },
+      "zoom_bot_in_call_mic_unmute_error"
     );
+  }
+  if (!clicked) {
+    log.info({ sessionId, n }, "zoom_bot_in_call_mic_unmute_skipped");
   }
 }
 
@@ -49,7 +104,10 @@ async function ensureMicUnmutedForVoice(page, log, sessionId) {
  *   pulseSlot?: number,
  *   sessionId?: string,
  *   cancelToken?: import("../agent/cancel.js").CancelToken,
- *   agent?: { runInCall: (ctx: object) => Promise<unknown> },
+ *   agent?: {
+ *     preinjectAudio?: (page: import("playwright-core").Page) => Promise<unknown>,
+ *     runInCall: (ctx: object) => Promise<unknown>,
+ *   },
  *   displayName?: string,
  * }} [options]
  */
@@ -72,6 +130,9 @@ async function runZoomBot(origUrl, transcriptPath, headless, options = {}) {
   const context = await browser.newContext(buildContextOptions(headless));
   await context.route("zoommtg://*", (r) => r.abort());
   const page = await context.newPage();
+  if (agent && typeof agent.preinjectAudio === "function") {
+    await agent.preinjectAudio(page);
+  }
 
   // Track caption state per speaker for sliding window deduplication
   const lastTextBySpeaker = new Map();

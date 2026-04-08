@@ -17,14 +17,21 @@ async function injectMicCapture(page, opts) {
         ws.onopen = () => resolve(undefined);
         ws.onerror = () => reject(new Error("ws error"));
       });
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          channelCount: 1,
-        },
-        video: false,
-      });
+      // Use real/fake capture device, not TTS MediaStreamDestination (browser_injection hook).
+      window.__nullxesBypassFakeMic = true;
+      let stream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            channelCount: 1,
+          },
+          video: false,
+        });
+      } finally {
+        window.__nullxesBypassFakeMic = false;
+      }
       const ctx = new (window.AudioContext || window.webkitAudioContext)();
       const source = ctx.createMediaStreamSource(stream);
       const bufferSize = 4096;

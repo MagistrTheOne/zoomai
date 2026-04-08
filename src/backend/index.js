@@ -46,6 +46,10 @@ if (!fs.existsSync(transcriptsDir)) {
   fs.mkdirSync(transcriptsDir);
 }
 
+/**
+ * Legacy demo: joins Zoom + captions only — no SessionWorker / TTS / STT / preinjectAudio.
+ * For voice agent use POST /sessions (control plane).
+ */
 app.post("/api/invite_bot", (req, res) => {
   const { meetingUrl } = req.body;
   if (!meetingUrl) {

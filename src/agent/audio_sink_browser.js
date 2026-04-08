@@ -1,15 +1,23 @@
 /**
- * Dev path: inject PCM into Zoom via Web Audio in-page (no PulseAudio).
- * Requires setupBrowserAudioSink(page) once after navigation.
+ * Inject TTS PCM into Zoom via Web Audio: MediaStreamDestination + getUserMedia hook.
+ * PCM pushed here is **16 kHz mono s16le** — must match `tts_openai.js` after resample
+ * (API returns 24 kHz; `streamSpeak` resamples to 16 kHz before frames hit the pacer).
+ * WebRTC may resample the MediaStream for transport; the graph runs at SR below.
+ *
+ * Must run via addInitScript before the first navigation.
  */
 
 const INJECT_MARK = "__nullxesAudioInjected";
 
+/** Playback sample rate — keep aligned with `src/agent/tts_openai.js` OUT_SR. */
+const INJECT_SR = 16000;
+
 const INJECT_SNIPPET = `(() => {
   if (window.${INJECT_MARK}) return;
   window.${INJECT_MARK} = true;
+
   const FRAME_SAMPLES = 320;
-  const SR = 16000;
+  const SR = ${INJECT_SR};
   const ctx = new AudioContext({ sampleRate: SR });
   const dest = ctx.createMediaStreamDestination();
   const gain = ctx.createGain();
@@ -18,6 +26,18 @@ const INJECT_SNIPPET = `(() => {
   let playHead = 0;
   let scheduled = 0;
   const maxQueued = 200;
+  /** @type {Set<AudioBufferSourceNode>} */
+  const activeSources = new Set();
+
+  function armResumeOnGesture() {
+    const resume = () => {
+      if (ctx.state === "suspended") ctx.resume().catch(function () {});
+    };
+    document.addEventListener("click", resume, { once: true, capture: true });
+    document.addEventListener("keydown", resume, { once: true, capture: true });
+    document.addEventListener("pointerdown", resume, { once: true, capture: true });
+  }
+  armResumeOnGesture();
 
   function scheduleChunk(int16) {
     if (scheduled > maxQueued) return;
@@ -34,10 +54,17 @@ const INJECT_SNIPPET = `(() => {
     src.start(t);
     playHead = t + buf.duration;
     scheduled++;
-    src.onended = () => { scheduled--; };
+    activeSources.add(src);
+    src.onended = function () {
+      scheduled--;
+      activeSources.delete(src);
+    };
   }
 
   window.__nullxesPushPCM = function (b64) {
+    if (ctx.state === "suspended") {
+      ctx.resume().catch(function () {});
+    }
     const bin = atob(b64);
     const len = bin.length;
     if (len < 2 || len % 2 !== 0) return;
@@ -51,6 +78,12 @@ const INJECT_SNIPPET = `(() => {
   };
 
   window.__nullxesFlushAudio = function () {
+    for (const s of activeSources) {
+      try {
+        s.stop(0);
+      } catch (e) {}
+    }
+    activeSources.clear();
     playHead = ctx.currentTime;
     scheduled = 0;
   };
@@ -58,15 +91,51 @@ const INJECT_SNIPPET = `(() => {
   window.__nullxesGetMicStream = function () {
     return dest.stream;
   };
+
+  /** When true, getUserMedia passes through to the real device (STT capture in injectMicCapture). */
+  window.__nullxesBypassFakeMic = false;
+
+  function patchGetUserMedia() {
+    const md = navigator.mediaDevices;
+    if (!md || typeof md.getUserMedia !== "function") return false;
+    if (md.getUserMedia.__nullxesPatched) return true;
+    const orig = md.getUserMedia.bind(md);
+    md.getUserMedia = async function (constraints) {
+      const c = constraints || {};
+      const wantAudio = !!c.audio;
+      const wantVideo = !!c.video;
+      if (wantAudio && !window.__nullxesBypassFakeMic) {
+        if (wantVideo) {
+          const vStream = await orig({ video: c.video, audio: false });
+          const aTrack = dest.stream.getAudioTracks()[0];
+          const tracks = [aTrack, ...vStream.getVideoTracks()].filter(Boolean);
+          return new MediaStream(tracks);
+        }
+        return dest.stream;
+      }
+      return orig(constraints);
+    };
+    md.getUserMedia.__nullxesPatched = true;
+    window.__nullxesOrigGetUserMedia = orig;
+    return true;
+  }
+
+  if (!patchGetUserMedia()) {
+    const start = Date.now();
+    const t = setInterval(function () {
+      if (patchGetUserMedia() || Date.now() - start > 5000) clearInterval(t);
+    }, 10);
+  }
 })();
 `;
 
 /**
+ * Register init script only (runs before page JS, including Zoom's getUserMedia).
+ *
  * @param {import('playwright-core').Page} page
  */
 async function setupBrowserAudioSink(page) {
   await page.addInitScript(INJECT_SNIPPET);
-  await page.evaluate(INJECT_SNIPPET);
 }
 
 /**
@@ -110,4 +179,5 @@ module.exports = {
   BrowserAudioSink,
   setupBrowserAudioSink,
   INJECT_SNIPPET,
+  INJECT_SR,
 };

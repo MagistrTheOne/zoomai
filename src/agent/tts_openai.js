@@ -2,6 +2,7 @@
 
 const { getResolvedModels } = require("./config");
 
+/** Output rate for pacer / `browser_injection` AudioContext — keep in sync with `audio_sink_browser.js` INJECT_SR. */
 const OUT_SR = 16000;
 const IN_SR = 24000;
 

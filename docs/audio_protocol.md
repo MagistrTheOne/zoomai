@@ -180,6 +180,21 @@ These are **integration targets / TO BE DECIDED** for the C++ client and network
 
 ---
 
+## Live checks (`browser_injection`)
+
+After fixes for synthetic mic + `getUserMedia` hook, logs should show:
+
+| Event / field | Meaning |
+|---------------|---------|
+| `browser_audio_sink_preinjected` | `addInitScript` registered before `page.goto`; hook + AudioContext graph ready for Zoom's GUM. |
+| `zoom_bot_in_call_unmute_clicked` (or `_skipped`) | Toolbar unmute attempt after join. |
+| `turn_latency` with `tts_total_bytes > 0` | TTS PCM reached the pacer/sink. If **0** → API keys, model, or cancel before first chunk. |
+| If bytes **> 0** but inaudible → **AudioContext suspended** (check `ctx.resume` path) or host muted participant. |
+
+**Sample rate:** OpenAI Speech returns **24 kHz** PCM; `tts_openai.js` resamples to **16 kHz** before frames are paced. `audio_sink_browser.js` uses the same **16 kHz** `AudioContext`; WebRTC may further resample the `MediaStream` for transport.
+
+---
+
 ## Appendix A — Environment variables (audio)
 
 | Variable | Default | Role |
