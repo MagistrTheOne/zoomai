@@ -18,6 +18,29 @@ const {
 const { createLogger } = require("../agent/logger");
 
 /**
+ * Zoom often joins guests muted. Click Unmute so browser_injection / TTS is audible.
+ * @param {import("playwright-core").Page} page
+ * @param {ReturnType<createLogger>} log
+ * @param {string} [sessionId]
+ */
+async function ensureMicUnmutedForVoice(page, log, sessionId) {
+  const unmute = page.getByRole("button", {
+    name: /unmute.*microphone|unmute your microphone|unmute my microphone|^unmute$/i,
+  });
+  try {
+    const btn = unmute.first();
+    await btn.waitFor({ state: "visible", timeout: 8_000 });
+    await btn.click({ timeout: 4_000 });
+    log.info({ sessionId }, "zoom_bot_in_call_unmute_clicked");
+  } catch (err) {
+    log.info(
+      { sessionId, msg: err?.message },
+      "zoom_bot_in_call_mic_unmute_skipped"
+    );
+  }
+}
+
+/**
  * @param {string} origUrl
  * @param {string} transcriptPath
  * @param {boolean} headless
@@ -132,24 +155,9 @@ async function runZoomBot(origUrl, transcriptPath, headless, options = {}) {
     await joinBtn.click();
     log.info({ sessionId: options.sessionId }, "zoom_bot_prejoin_join_clicked");
 
-    // Best-effort prejoin mute. The button label varies across Zoom builds.
-    // If we can't find it, log and continue — the bot will join with mic on,
-    // which is fine for first checkpoints.
-    const muteCandidate = page.locator("button").filter({
-      hasText:
-        /^(mute|unmute|turn off (microphone|mic)|microphone|audio)$/i,
-    }).first();
-    try {
-      await muteCandidate.waitFor({ state: "visible", timeout: 5_000 });
-      await muteCandidate.click({ timeout: 3_000 });
-      log.info({ sessionId: options.sessionId }, "zoom_bot_prejoin_mute_clicked");
-    } catch (err) {
-      log.warn(
-        { sessionId: options.sessionId, msg: err?.message },
-        "zoom_bot_prejoin_mute_skipped"
-      );
-      // intentionally continue — joining with mic on is acceptable for now
-    }
+    // Do not click prejoin mic toggles: Zoom labels the button "Mute" when the
+    // mic is live — an ambiguous /^mute|unmute$/ click was muting the bot before
+    // join. Voice agents need the mic unmuted for real-time TTS.
 
     // Confirm we're inside the meeting by waiting for the bottom toolbar.
     // The button label depends on camera state ("Stop video" if camera on,
@@ -215,6 +223,8 @@ async function runZoomBot(origUrl, transcriptPath, headless, options = {}) {
     }
 
     console.log("✅  inside meeting! hooking into captions...");
+
+    await ensureMicUnmutedForVoice(page, log, options.sessionId);
 
     // handle extracting captions from the webpage
     await startParticipantObserver(page);
