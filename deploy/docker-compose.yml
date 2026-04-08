@@ -1,0 +1,28 @@
+# Deploy stack — run from repository root:
+#   docker compose -f deploy/docker-compose.yml up -d
+#
+# Requires ../.env (copy from .env.example). Or pass OPENAI_API_KEY via environment.
+
+services:
+  nullxes-ai:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: nullxes-ai-meeting:latest
+    container_name: nullxes-ai-meeting
+    init: true
+    shm_size: "2gb"
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3000}:3000"
+      - "${CONTROL_PORT:-8080}:8080"
+      - "${AUDIO_CAPTURE_WS_PORT:-47001}:47001"
+    env_file:
+      - ../.env
+    environment:
+      NODE_ENV: production
+    volumes:
+      - nullxes_transcripts:/app/transcripts
+
+volumes:
+  nullxes_transcripts:

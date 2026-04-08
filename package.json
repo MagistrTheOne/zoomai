@@ -6,7 +6,10 @@
     "dev": "nodemon src/backend/index.js",
     "start": "node src/backend/index.js",
     "test": "node --test tests/**/*.test.js",
-    "docker:build": "node scripts/docker-build.cjs"
+    "docker:build": "node scripts/docker-build.cjs",
+    "docker:deploy:build": "docker build -f deploy/Dockerfile -t nullxes-ai-meeting:latest .",
+    "docker:deploy:up": "docker compose -f deploy/docker-compose.yml up -d",
+    "docker:deploy:down": "docker compose -f deploy/docker-compose.yml down"
   },
   "author": "",
   "license": "ISC",
@@ -14,10 +17,10 @@
   "devDependencies": {
     "@playwright/test": "^1.54.1",
     "@types/node": "^24.0.13",
-    "nodemon": "^3.1.9",
-    "playwright-core": "^1.54.1"
+    "nodemon": "^3.1.9"
   },
   "dependencies": {
+    "playwright-core": "^1.54.1",
     "dotenv": "^17.2.0",
     "express": "^5.1.0",
     "openai": "^4.77.0",
