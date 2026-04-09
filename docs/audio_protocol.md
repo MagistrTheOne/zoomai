@@ -216,4 +216,28 @@ After fixes for synthetic mic + `getUserMedia` hook, logs should show:
 
 ---
 
+## Appendix C — Audio backend modes for C++ micro-client (target)
+
+For the external C++ micro-client rollout, both backends are considered valid:
+
+### Mode A: PulseAudio native
+
+- Use PulseAudio virtual sources/sinks directly.
+- Keep a configurable pool (minimum 10 input + 10 output endpoints).
+- Validate device availability at startup before accepting `start_attempt`.
+
+### Mode B: PipeWire with Pulse compatibility
+
+- Run via PipeWire pulse-compat layer so existing Pulse-oriented routing remains usable.
+- Validate that virtual devices are visible through pulse-compatible APIs.
+- Keep the same session pool semantics as Pulse native mode.
+
+### Common requirements
+
+- Startup must fail fast (or mark unhealthy) if requested pool size cannot be provisioned.
+- Session teardown must always release audio resources and return worker slot.
+- Operational diagnostics should expose which backend is active per process.
+
+---
+
 *End of audio plane specification.*

@@ -83,3 +83,12 @@ curl -sS http://localhost:8080/healthz
 | Назначение | разработка / legacy `docker:build` | прод-деплой |
 
 Образ Playwright тот же (`mcr.microsoft.com/playwright:v1.54.1-jammy`), entrypoint с Pulse — как в основном образе.
+
+## Документы для micro-client handoff
+
+Для контура C++ Zoom micro-client и разделов 7–10 ТЗ используйте:
+
+- `docs/NULLXES_Integration_Pack_v1.md` (канонические контракты payload/events)
+- `docs/NULLXES_Microclient_Integration_v1.md` (архитектура и WS-модель)
+- `docs/NULLXES_Microclient_Runbook_v1.md` (install/start/stop/restart/autostart runbook)
+- `docs/NULLXES_Microclient_Handoff_v1.md` (PDF-friendly master bundle)

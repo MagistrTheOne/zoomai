@@ -8,3 +8,6 @@ node_modules/
 /playwright-report/
 /blob-report/
 /playwright/.cache/
+
+# C++ Zoom micro-client (reference skeleton; tracked separately / local only)
+examples/cpp_microclient/
